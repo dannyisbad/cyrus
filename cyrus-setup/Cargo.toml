@@ -1,0 +1,39 @@
+[package]
+name = "cyrus-setup"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The cyrus setup engine: brings up Chrome+CDP with a logged-in chatgpt.com session, the cloudflared tunnel, the chimera+lipsync stack, and the ChatGPT MCP connector — idempotently, with progress events for a TUI front-end."
+
+# NOTE: no artifact may contain "setup"/"install"/"update"/"patch" in its file
+# name — Windows Installer Detection demands elevation (os error 740) for such
+# exes, which would break both `cargo test` and the shipped CLI. Hence the bin
+# is `cyrus` (subcommand `cyrus setup`) and the lib target is `cyrus_engine`.
+[[bin]]
+name = "cyrus"
+path = "src/main.rs"
+
+[lib]
+name = "cyrus_engine"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+# CDP client + browser control come from the lipsync port (CdpClient::for_target,
+# BrowserControl) — proven live; no second CDP implementation. Both stack crates
+# are also embedded as hidden `cyrus chimera` / `cyrus lipsync` subcommands so the
+# whole system ships as the single `cyrus` binary (busybox pattern — see main.rs).
+cyrus-lipsync = { path = "../cyrus-lipsync" }
+cyrus-chimera = { path = "../cyrus-chimera" }
+
+# Loopback + tunnel HTTP probes, arm-consent POST, MCP verification.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# bearer/nonce/signing-key generation.
+rand = "0.8"
+# ${CODEX_HOME}/config.toml provider write that preserves the user's formatting.
+toml_edit = "0.22"

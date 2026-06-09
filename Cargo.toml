@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "cyrus-chimera",
+    "cyrus-lipsync",
+    "cyrus-setup",
+    "tests/differential",
+]
+
+# Shared dependency versions for both crates. Pinning here keeps the two ports
+# on one lockfile and avoids drift as the skeleton fills in.
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+hyper = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+futures = "0.3"
+
+# Shared across both ports (chimera + lipsync).
+tokio-stream = "0.1"
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
+
+[profile.release]
+opt-level = 3

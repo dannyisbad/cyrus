@@ -1,0 +1,59 @@
+[package]
+name = "cyrus-chimera"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust port of the chimera MCP + tool-relay + OAuth server (repo-agent-mcp)."
+
+[[bin]]
+name = "cyrus-chimera"
+path = "src/main.rs"
+
+[lib]
+name = "cyrus_chimera"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+hyper = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# catch_unwind on tool-handler futures (mcp.rs): a panicking handler must become
+# an isError CallToolResult, never a connection with no response.
+futures = { workspace = true }
+# fmt subscriber so the tracing call sites actually land somewhere (cli.rs).
+# Without it every tracing macro is a no-op and chimera.log stays 0 bytes.
+# Same version/features as cyrus-lipsync.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# OAuth/JWT: HS256 token signing + PKCE S256 verification. `ring` OR `hmac+sha2`
+# were both options in the brief; we take hmac+sha2+sha2 (pure-Rust, matches the
+# Node createHmac("sha256") exactly) plus jsonwebtoken for higher-level JWT work.
+hmac = "0.12"
+sha2 = "0.10"
+jsonwebtoken = "9"
+
+# Streaming SSE bodies for /events tail (ReceiverStream wrapper).
+tokio-stream = { workspace = true }
+# RFC3339 timestamps + millis formatting for job/event records (state.rs, subagent.rs).
+chrono = "0.4"
+# UUID v4 ids for jobs/events (state.rs).
+uuid = { workspace = true }
+# Stable insertion-ordered job map (state.rs).
+indexmap = "2"
+# Tool-name / argument validation patterns (tools.rs).
+regex = { workspace = true }
+# OAuth: redirect-uri parsing + x-www-form-urlencoded body parsing (oauth.rs).
+url = "2"
+form_urlencoded = "1"
+# Relay client: shell_command / apply_patch / update_plan relay to codex over the
+# shim's /control/toolcall long-poll (register.rs, ports register.ts's `fetch`).
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# OAuth: OS RNG for PKCE/state nonces (oauth.rs).
+getrandom = "0.2"
+# Windows path canonicalization without \\?\ verbatim prefixes (config.rs).
+dunce = "1"

@@ -1,0 +1,23 @@
+/target/
+**/target/
+# release bundle output
+/dist/
+# chimera runtime state (event store) if a server is run from the repo root
+.repo-agent-mcp/
+# local captures / scratch — HAR files can contain live session cookies
+*.har
+*.log
+# runtime secrets & state — NEVER commit (these live in ~/.cyrus at runtime;
+# guard against any stray copy landing in the tree)
+.cyrus/
+**/secrets.json
+**/connector.json
+**/*.pem
+**/*.key
+**/chrome-profile/
+# editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
