@@ -1,0 +1,19 @@
+# Pinned codex fork that this cyrus release builds against.
+#
+# cyrus ships TWO binaries side by side (cyrus.exe + codex.exe). codex is a
+# patched fork (shadow-tui: the Hannah Montana onboarding option + the clean
+# `cyrus` provider display). This file pins the EXACT commit so a release is
+# reproducible without vendoring codex's full tree into this repo.
+#
+# Upgrade flow:
+#   1. cd your codex checkout (origin = the fork, upstream = openai/codex)
+#   2. git fetch upstream
+#   3. git rebase --onto rust-vX.Y.Z <old-base> shadow-tui   # replay our patch
+#   4. git push --force-with-lease origin shadow-tui
+#   5. update `sha` below to the new shadow-tui HEAD and commit it here
+#
+# scripts/release.ps1 reads url + sha and clones the fork at that commit.
+
+url = https://github.com/dannyisbad/codex.git
+ref = shadow-tui
+sha = 92f7a5b8829d9d12c5c466ba424a9e0d2e3ace62
