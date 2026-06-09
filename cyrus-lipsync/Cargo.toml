@@ -1,0 +1,46 @@
+[package]
+name = "cyrus-lipsync"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust port of the lipsync responses shim: impersonates OpenAI /v1/responses to codex, drives a chatgpt.com tab over CDP, and reconstructs answer tokens from the page websocket."
+
+[[bin]]
+name = "cyrus-lipsync"
+path = "src/main.rs"
+
+[lib]
+name = "cyrus_lipsync"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+
+# CDP transport. The Python used a hand-rolled aiohttp websocket CDP client; the
+# brief offers chromiumoxide OR a raw CDP-over-websocket client. We take the raw
+# route (tokio-tungstenite) to keep the per-tab one-socket isolation the Python
+# relies on (CDPClient.for_target), without chromiumoxide's session model.
+tokio-tungstenite = "0.24"
+
+# Streaming responses: ReceiverStream SSE body (responses.rs).
+tokio-stream = { workspace = true }
+# UUID v4 ids for response/item/call ids (responses.rs, conductor.rs).
+uuid = { workspace = true }
+# AGENT_STATUS sentinel + model-version token parsing (subagent_mux.rs, responses.rs).
+regex = { workspace = true }
+# async fn in traits for the ChatSurface/TurnDriver/ConductorShim shims.
+async-trait = "0.1"
+# HTTP client for chimera's /control/* REST endpoints and the /events SSE tail.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+# Jittered backoff / nonce generation (tab_factory.rs).
+rand = "0.8"
+# fmt subscriber for the tracing call sites (main.rs); honors RUST_LOG with an
+# `info` default, standing in for the Python's bare `print(..., flush=True)`.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

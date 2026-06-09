@@ -1,0 +1,23 @@
+[package]
+name = "cyrus-differential"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Differential test harness: proves the Rust port (cyrus-lipsync + cyrus-chimera) emits output byte-identical to the Python (idare/shadow) and Node (repo-agent-mcp) originals on fixed inputs."
+publish = false
+
+# The `emit` binary renders canonical output for the Rust port; the integration
+# test (tests/differential.rs) shells out to python/node, runs `emit`, and
+# byte-diffs the two. Run it with `cargo test -p cyrus-differential`.
+[[bin]]
+name = "cyrus-diff-emit"
+path = "src/emit.rs"
+
+[dependencies]
+cyrus-lipsync = { path = "../../cyrus-lipsync" }
+cyrus-chimera = { path = "../../cyrus-chimera" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

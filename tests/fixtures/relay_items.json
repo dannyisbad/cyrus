@@ -1,0 +1,14 @@
+{
+  "_comment": "chimera tool-call relay shaping: the function_call / custom_tool_call output items the conductor emits for a relayed chimera call (selftest.py::test_tool_call_items_accepted + conductor stream_turn). call_id is FIXED in every case so the emitted item byte-compares. arguments on a function_call MUST be a JSON *string* on the wire.",
+  "function_call": [
+    {"name": "shell_echo", "tool": "shell_command", "arguments": {"command": "echo hi"}, "call_id": "call_fixed01"},
+    {"name": "shell_unicode", "tool": "shell_command", "arguments": {"command": "Write-Output \"café 🚀\""}, "call_id": "call_fixed02"},
+    {"name": "args_with_newline", "tool": "shell_command", "arguments": {"command": "line1\nline2", "extra": "a\\b"}, "call_id": "call_fixed03"},
+    {"name": "string_arguments_passthrough", "tool": "weird", "arguments": "{\"already\":\"a string\"}", "call_id": "call_fixed04"},
+    {"name": "empty_arguments", "tool": "noargs", "arguments": {}, "call_id": "call_fixed05"}
+  ],
+  "custom_tool_call": [
+    {"name": "apply_patch", "tool": "apply_patch", "input": "*** Begin Patch\n*** End Patch\n", "call_id": "call_fixed10"},
+    {"name": "patch_unicode", "tool": "apply_patch", "input": "*** Begin Patch\n+café 🚀 \"q\" \\ slash\n*** End Patch\n", "call_id": "call_fixed11"}
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "_comment": "Cases for the /v1/responses SSE layer. extract_prompt cases mirror selftest.py::test_extract_prompt; full_turn cases drive the response.created->deltas->output_item.done->completed sequence (selftest.py::_emit_sequence). response_id is fixed so completed frames byte-compare.",
+  "extract_prompt": [
+    {
+      "name": "last_user_turn",
+      "body": {
+        "model": "gpt-5.1",
+        "instructions": "You are Codex, a coding agent. <giant system prompt>",
+        "input": [
+          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "first question"}]},
+          {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "first answer"}]},
+          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "second question"}]}
+        ],
+        "stream": true
+      },
+      "expect": "second question"
+    },
+    {
+      "name": "bare_string_input",
+      "body": {"input": "hello"},
+      "expect": "hello"
+    },
+    {
+      "name": "empty_input_instructions_fallback",
+      "body": {"input": [], "instructions": "fallback"},
+      "expect": "fallback"
+    },
+    {
+      "name": "content_as_bare_string",
+      "body": {"input": [{"role": "user", "content": "plain"}]},
+      "expect": "plain"
+    },
+    {
+      "name": "whitespace_trimmed",
+      "body": {"input": "  hi there \n"},
+      "expect": "hi there"
+    },
+    {
+      "name": "unicode_prompt",
+      "body": {"input": [{"role": "user", "content": [{"type": "input_text", "text": "café 🚀 \"q\""}]}]},
+      "expect": "café 🚀 \"q\""
+    }
+  ],
+  "full_turn": [
+    {
+      "name": "nasty_tokens_final_answer",
+      "response_id": "resp_test123",
+      "item_id": "msg_fixed01",
+      "tokens": ["Hel", "lo", ",\n", "a \"quote\" and \\ slash", " — café 🚀", " <<<not a sentinel>>>"]
+    },
+    {
+      "name": "single_token",
+      "response_id": "resp_one",
+      "item_id": "msg_fixed02",
+      "tokens": ["just one"]
+    },
+    {
+      "name": "empty_turn",
+      "response_id": "resp_empty",
+      "item_id": "msg_fixed03",
+      "tokens": []
+    }
+  ]
+}
