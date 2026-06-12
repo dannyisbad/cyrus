@@ -44,28 +44,14 @@ pub fn ensure_shadow_provider(shim_base_url: &str) -> anyhow::Result<bool> {
         .and_then(|mp| mp.get(SHADOW_PROVIDER_ID))
         .and_then(|p| p.get("requires_openai_auth"))
         .and_then(|v| v.as_bool());
-    let current_memories = doc
-        .get("features")
-        .and_then(|f| f.get("memories"))
-        .and_then(|v| v.as_bool());
     let current_name = doc
         .get("model_providers")
         .and_then(|mp| mp.get(SHADOW_PROVIDER_ID))
         .and_then(|p| p.get("name"))
         .and_then(|v| v.as_str());
-    let current_chronicle = doc
-        .get("features")
-        .and_then(|f| f.get("chronicle"))
-        .and_then(|v| v.as_bool());
-    let current_update_check = doc
-        .get("check_for_update_on_startup")
-        .and_then(|v| v.as_bool());
     if current == Some(shim_base_url)
         && current_auth == Some(false)
-        && current_memories == Some(false)
-        && current_chronicle == Some(false)
         && current_name == Some(SHADOW_PROVIDER_NAME)
-        && current_update_check == Some(false)
     {
         return Ok(false);
     }
@@ -92,26 +78,11 @@ pub fn ensure_shadow_provider(shim_base_url: &str) -> anyhow::Result<bool> {
     p["wire_api"] = value("responses");
     p["requires_openai_auth"] = value(false);
 
-    // Stop codex's startup update check: it polls openai/codex's *latest*
-    // release and would nag the user to "update" into a stock codex that has
-    // none of the cyrus patches (and isn't what they're running). Never phone
-    // upstream's release channel for a patched fork.
-    doc["check_for_update_on_startup"] = value(false);
-
-    // Background "shit features" that burn the user's ChatGPT quota or capture
-    // context for little benefit under shadow — pin them OFF so an upstream
-    // default flip on a future rebase can't silently turn them back on:
-    //   - memories: background consolidation fires extra model requests
-    //     (request_kind "memory" + /v1/memories/* unary calls) through the shim
-    //   - chronicle: a sidecar that passively snapshots screen context
-    if doc.get("features").is_none() {
-        doc["features"] = table();
-        if let Some(t) = doc["features"].as_table_mut() {
-            t.set_implicit(true);
-        }
-    }
-    doc["features"]["memories"] = value(false);
-    doc["features"]["chronicle"] = value(false);
+    // NOTE: cyrus-only session toggles (update-check off, memories/chronicle off)
+    // are NOT written here — the passthrough injects them as per-invocation `-c`
+    // overrides so they apply only when running through cyrus, never bleeding
+    // onto the user's plain `codex`. This block stays a pure provider definition
+    // (inert unless `model_provider=shadow` is selected).
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -153,9 +124,10 @@ mod tests {
         assert!(text.contains("[model_providers.shadow]"));
         assert!(text.contains("base_url = \"http://127.0.0.1:8765/v1\""));
         assert!(text.contains("requires_openai_auth = false"));
-        assert!(text.contains("memories = false"));
-        assert!(text.contains("chronicle = false"));
-        assert!(text.contains("check_for_update_on_startup = false"));
+        assert!(text.contains("name = \"cyrus\""));
+        // session toggles are NOT persisted here (injected as -c by passthrough)
+        assert!(!text.contains("memories"));
+        assert!(!text.contains("check_for_update_on_startup"));
         // user's existing keys preserved
         assert!(text.contains("model = \"gpt-5.5\""));
 

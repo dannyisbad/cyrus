@@ -230,9 +230,12 @@ async fn run_cyrus_command() -> ExitCode {
 // codex passthrough — cyrus as a front door to codex
 // ---------------------------------------------------------------------------
 
-/// Run `codex` with the user's args, injecting `-c model_provider=shadow` when
-/// cyrus has written that provider into the codex config. A one-line breadcrumb
-/// on stderr makes the handoff obvious. The exit code is codex's.
+/// Run `codex` with the user's args. Marks the launch as cyrus-wrapped (so our
+/// codex fork force-shows the cyrus onboarding when shadow isn't set up yet,
+/// regardless of OpenAI auth), injects `-c model_provider=shadow` once cyrus is
+/// configured, and applies the cyrus-only config toggles as per-invocation
+/// overrides — NOT persisted to config.toml, so a plain `codex` keeps its own
+/// update-check / memories / chronicle. The exit code is codex's.
 fn passthrough_to_codex() -> ExitCode {
     let user_args: Vec<String> = std::env::args().skip(1).collect();
     let configured = cyrus_engine::codex_config::current_provider_base_url().is_some();
@@ -240,10 +243,21 @@ fn passthrough_to_codex() -> ExitCode {
     passthrough_banner(configured);
 
     let mut cmd = codex_command();
+    cmd.env("CYRUS_WRAPPED", "1");
+    // Injected before the user's args so an explicit `-c ...` they pass still
+    // takes precedence.
     if configured {
-        // Injected before the user's args so an explicit `-c model_provider=...`
-        // they pass still takes precedence.
         cmd.arg("-c").arg("model_provider=shadow");
+    }
+    // Cyrus-session config (scoped here, never written to the user's config.toml):
+    // the memory/chronicle background calls burn ChatGPT quota, and the update
+    // check polls openai/codex for a fork that's none of the user's business.
+    for kv in [
+        "check_for_update_on_startup=false",
+        "features.memories=false",
+        "features.chronicle=false",
+    ] {
+        cmd.arg("-c").arg(kv);
     }
     cmd.args(&user_args);
 
