@@ -164,6 +164,23 @@ pub enum SetupEvent {
     UserActionResolved { step: Step },
 }
 
+/// Which tunnel lane to bring up. The TUI picks this (was an env var); the
+/// engine routes on it instead of auto-detecting when it's not `Auto`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TunnelChoice {
+    /// Precedence ladder (env var / config presence). Backward-compatible default.
+    #[default]
+    Auto,
+    /// Zero-config cloudflared quick tunnel. Instant, but the URL churns on
+    /// restart (the connector then needs re-registering).
+    Quick,
+    /// ngrok with a reserved static domain — a permanent URL from one free
+    /// signup. `domain` comes from the flag or `CYRUS_NGROK_DOMAIN`.
+    Ngrok { domain: Option<String> },
+    /// cloudflared named tunnel — you own a domain (`~/.cloudflared/config.yml`).
+    Named,
+}
+
 #[derive(Debug, Clone)]
 pub struct SetupOptions {
     /// Repo root chimera serves (`--repo`). The cwd codex runs in.
@@ -182,6 +199,8 @@ pub struct SetupOptions {
     pub effort: String,
     /// Connector display name on the ChatGPT side.
     pub connector_name: String,
+    /// Which tunnel lane to bring up (`--tunnel`). `Auto` = the precedence ladder.
+    pub tunnel: TunnelChoice,
 }
 
 impl SetupOptions {
@@ -196,6 +215,7 @@ impl SetupOptions {
             model: "gpt-5-5-thinking".to_string(),
             effort: "max".to_string(),
             connector_name: "repo".to_string(),
+            tunnel: TunnelChoice::Auto,
         }
     }
 
