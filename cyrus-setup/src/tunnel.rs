@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 
-use crate::{home_dir, SetupOptions};
+use crate::{home_dir, SetupOptions, TunnelChoice};
 
 pub struct TunnelOutcome {
     /// `https://<hostname>` — no trailing slash.
@@ -37,11 +37,26 @@ fn cloudflared_dir() -> PathBuf {
     home_dir().join(".cloudflared")
 }
 
+fn cloudflared_exe_name() -> &'static str {
+    if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" }
+}
+
 fn find_cloudflared_exe() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("CYRUS_CLOUDFLARED_EXE") {
         let p = PathBuf::from(p);
         if p.exists() {
             return Some(p);
+        }
+    }
+    // Bundled next to the cyrus binary (the ship layout: cyrus.exe + codex.exe +
+    // cloudflared.exe in one folder). Prefer it over a system install so the
+    // bundle is self-contained and needs no separate cloudflared install.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join(cloudflared_exe_name());
+            if sibling.exists() {
+                return Some(sibling);
+            }
         }
     }
     #[cfg(windows)]
@@ -162,6 +177,40 @@ fn spawn_detached(mut cmd: std::process::Command, log: PathBuf) -> anyhow::Resul
 ///                          cleanup is surgical). The out-of-box fallback.
 ///   4. ngrok ephemeral — only if cloudflared is absent. Random URL, same churn.
 pub async fn ensure_tunnel(opts: &SetupOptions) -> anyhow::Result<TunnelOutcome> {
+    // An explicit choice (from the TUI's tunnel picker, via `--tunnel`) routes
+    // directly to that lane with an actionable error if its prereqs are missing.
+    // `Auto` falls through to the precedence ladder below (backward-compatible).
+    match &opts.tunnel {
+        TunnelChoice::Quick => {
+            anyhow::ensure!(
+                find_cloudflared_exe().is_some(),
+                "cloudflared not found — install it (winget install Cloudflare.cloudflared) \
+                 and re-run, or pick the ngrok tunnel instead"
+            );
+            return cloudflared_quick(opts).await;
+        }
+        TunnelChoice::Named => {
+            anyhow::ensure!(
+                parse_named_tunnel().is_some(),
+                "no named cloudflared tunnel found at ~/.cloudflared/config.yml — set one up \
+                 (you need your own domain), or pick the quick or ngrok tunnel"
+            );
+            return cloudflared_named(opts).await;
+        }
+        TunnelChoice::Ngrok { domain } => {
+            anyhow::ensure!(
+                ngrok_available(),
+                "ngrok not found — install it (https://ngrok.com/download), run \
+                 `ngrok config add-authtoken <token>`, then re-run"
+            );
+            let domain = domain.clone().or_else(|| {
+                std::env::var("CYRUS_NGROK_DOMAIN").ok().filter(|s| !s.is_empty())
+            });
+            return ensure_ngrok(opts, domain).await;
+        }
+        TunnelChoice::Auto => {}
+    }
+
     let ngrok_domain = std::env::var("CYRUS_NGROK_DOMAIN")
         .ok()
         .filter(|s| !s.is_empty());

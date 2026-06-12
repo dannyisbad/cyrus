@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use cyrus_engine::{
-    diagnose, ensure_all, SetupEvent, SetupOptions, SetupOutcome, Step,
+    diagnose, ensure_all, SetupEvent, SetupOptions, SetupOutcome, Step, TunnelChoice,
 };
 
 struct Cli {
@@ -43,6 +43,8 @@ fn step_key(step: Step) -> &'static str {
 fn parse_args() -> Cli {
     let mut repo = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let mut json = false;
+    let mut tunnel = TunnelChoice::Auto;
+    let mut ngrok_domain: Option<String> = None;
     // skip argv0 and the subcommand token.
     let mut args = std::env::args().skip(2);
     while let Some(a) = args.next() {
@@ -53,16 +55,32 @@ fn parse_args() -> Cli {
                 }
             }
             "--json" => json = true,
+            // `--tunnel <auto|quick|ngrok|named>` — the lane the TUI picker chose.
+            "--tunnel" => match args.next().as_deref() {
+                Some("auto") => tunnel = TunnelChoice::Auto,
+                Some("quick") => tunnel = TunnelChoice::Quick,
+                Some("ngrok") => tunnel = TunnelChoice::Ngrok { domain: None },
+                Some("named") => tunnel = TunnelChoice::Named,
+                other => {
+                    eprintln!("--tunnel expects auto|quick|ngrok|named (got {other:?})");
+                    std::process::exit(2);
+                }
+            },
+            // Optional reserved ngrok domain for `--tunnel ngrok`.
+            "--ngrok-domain" => ngrok_domain = args.next().filter(|s| !s.is_empty()),
             other => {
                 eprintln!("unknown arg: {other}");
                 std::process::exit(2);
             }
         }
     }
-    Cli {
-        opts: SetupOptions::new(repo),
-        json,
+    // Fold a `--ngrok-domain` into the ngrok choice.
+    if let (TunnelChoice::Ngrok { domain }, Some(d)) = (&mut tunnel, ngrok_domain) {
+        *domain = Some(d);
     }
+    let mut opts = SetupOptions::new(repo);
+    opts.tunnel = tunnel;
+    Cli { opts, json }
 }
 
 fn emit_json(obj: serde_json::Value) {
