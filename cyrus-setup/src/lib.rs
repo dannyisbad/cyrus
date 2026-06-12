@@ -486,10 +486,12 @@ pub async fn ensure_all(
     });
     fully_reused &= stack.reused;
 
-    // Verify the tunnel actually reaches OUR chimera before touching ChatGPT.
-    tunnel::verify_through_tunnel(&tunnel.public_url).await?;
-
+    // Start the connector step BEFORE the tunnel verify: a fresh quick tunnel
+    // can take a couple of minutes to become edge-routable, and we'd rather show
+    // "Wiring the ChatGPT connector" during that wait than freeze on the last
+    // step looking hung. Verify reaches OUR chimera before we touch ChatGPT.
     emit(SetupEvent::StepStarted { step: Step::Connector });
+    tunnel::verify_through_tunnel(&tunnel.public_url).await?;
     let connector = connector::ensure_connector(opts, &secrets, &tunnel.public_url, &chrome).await?;
     emit(SetupEvent::StepDone {
         step: Step::Connector,

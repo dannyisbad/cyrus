@@ -517,10 +517,13 @@ pub async fn tunnel_alive(public_url: &str) -> bool {
     }
 }
 
-/// The end-to-end proof: the public hostname reaches OUR chimera.
+/// The end-to-end proof: the public hostname reaches OUR chimera. A fresh
+/// cloudflared QUICK tunnel can take a couple of minutes to become routable at
+/// the edge (named/ngrok-static come up fast and return early on success), so we
+/// wait up to 3 minutes rather than failing a slow-but-fine tunnel.
 pub async fn verify_through_tunnel(public_url: &str) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     loop {
         let last = match client
             .get(format!("{public_url}/"))
