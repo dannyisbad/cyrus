@@ -3,6 +3,7 @@ name = "cyrus-setup"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+build = "build.rs"
 description = "The cyrus setup engine: brings up Chrome+CDP with a logged-in chatgpt.com session, the cloudflared tunnel, the chimera+lipsync stack, and the ChatGPT MCP connector — idempotently, with progress events for a TUI front-end."
 
 # NOTE: no artifact may contain "setup"/"install"/"update"/"patch" in its file
@@ -37,3 +38,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rand = "0.8"
 # ${CODEX_HOME}/config.toml provider write that preserves the user's formatting.
 toml_edit = "0.22"
+# Decompress the embedded codex/cloudflared blobs at runtime (release single-binary
+# builds only; dev builds embed nothing). Compression happens in build.rs.
+zstd = "0.13"
+
+[build-dependencies]
+# Compress the embedded binaries when CYRUS_EMBED_* is set at build time.
+zstd = "0.13"

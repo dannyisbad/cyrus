@@ -48,6 +48,12 @@ fn find_cloudflared_exe() -> Option<PathBuf> {
             return Some(p);
         }
     }
+    // Embedded in the single-binary build — extracted to ~/.cyrus/bin on first
+    // use. Preferred over a system install so a release `cyrus.exe` needs nothing
+    // else on the machine.
+    if let Some(extracted) = crate::embedded::embedded_cloudflared_path() {
+        return Some(extracted);
+    }
     // Bundled next to the cyrus binary (the ship layout: cyrus.exe + codex.exe +
     // cloudflared.exe in one folder). Prefer it over a system install so the
     // bundle is self-contained and needs no separate cloudflared install.

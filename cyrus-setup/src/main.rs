@@ -263,9 +263,12 @@ fn passthrough_to_codex() -> ExitCode {
 }
 
 /// Build the `Command` that runs codex, resolving it robustly:
-/// `CYRUS_CODEX_BIN` → a `codex` next to our exe (bundled layout) → a PATH
-/// search that honors Windows `PATHEXT` (so an npm `codex.cmd` shim is found and
-/// launched via `cmd /C`).
+/// `CYRUS_CODEX_BIN` → the embedded codex (single-binary builds) → a `codex`
+/// next to our exe (bundle layout) → a PATH search that honors Windows `PATHEXT`
+/// (so an npm `codex.cmd` shim is found and launched via `cmd /C`).
+///
+/// The embedded copy is preferred over PATH so a stray `npm` codex can never
+/// shadow the patched fork; `CYRUS_CODEX_BIN` still overrides it for dev.
 fn codex_command() -> std::process::Command {
     use std::path::PathBuf;
     use std::process::Command;
@@ -275,6 +278,9 @@ fn codex_command() -> std::process::Command {
         if p.exists() {
             return wrap_for_shim(p);
         }
+    }
+    if let Some(extracted) = cyrus_engine::embedded::embedded_codex_path() {
+        return Command::new(extracted);
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {

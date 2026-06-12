@@ -23,6 +23,7 @@
 pub mod chrome;
 pub mod codex_config;
 pub mod connector;
+pub mod embedded;
 pub mod secrets;
 pub mod stack;
 pub mod tunnel;
