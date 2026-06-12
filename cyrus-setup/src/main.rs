@@ -150,7 +150,7 @@ fn step_verbs(step: Step) -> (&'static str, &'static str, &'static str) {
 /// `cyrus` is the single front door. A small reserved set of subcommands is
 /// cyrus's own; **everything else is passed straight through to `codex`**, with
 /// the `shadow` model provider injected when cyrus is set up. So `cyrus` is a
-/// drop-in alias for `codex` that runs on your ChatGPT subscription.
+/// drop-in alias for `codex` that runs on the plan you already pay for.
 ///
 /// Reserved (cyrus-owned, never reaches codex):
 ///   setup, check        — bring up / diagnose the stack
@@ -325,9 +325,9 @@ fn passthrough_banner(configured: bool) {
     use std::io::IsTerminal;
     let dim = std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal();
     let line = if configured {
-        "cyrus › codex — on your ChatGPT subscription (shadow).  cyrus commands: setup · check"
+        "cyrus › codex — running on cyrus.  cyrus commands: setup · check"
     } else {
-        "cyrus › codex — default provider.  run `cyrus setup` to use your ChatGPT subscription"
+        "cyrus › codex — default provider.  run `cyrus setup` to switch to cyrus"
     };
     if dim {
         eprintln!("\x1b[2m{line}\x1b[0m");
@@ -425,7 +425,7 @@ fn print_intro(opts: &SetupOptions) {
     println!("  {}", opts.repo_root.display());
     println!();
     println!(
-        "Wiring codex to your ChatGPT subscription — {} steps, each verified and repaired\n\
+        "Setting up cyrus — {} steps, each verified and repaired\n\
          as needed. The only thing it may ask of you is a one-time ChatGPT login.\n",
         Step::ALL.len()
     );
@@ -491,9 +491,9 @@ fn render_success(json: bool, opts: &SetupOptions, out: &SetupOutcome) {
     }
     println!();
     let msg = if out.fully_reused {
-        "everything was already up — codex is wired to your ChatGPT subscription"
+        "everything was already up — codex is running on cyrus"
     } else {
-        "codex is wired to your ChatGPT subscription"
+        "codex is now running on cyrus"
     };
     println!("{}", gutter_row("Ready", GREEN, msg));
     println!();
