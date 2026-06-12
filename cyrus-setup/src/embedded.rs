@@ -39,8 +39,12 @@ pub fn has_embedded_codex() -> bool {
 /// `~/.cyrus/bin` (honors `CYRUS_HOME`) — where extracted binaries are cached.
 #[cfg(any(embed_codex, embed_cloudflared))]
 fn cache_dir() -> PathBuf {
+    // Trim CYRUS_HOME: a trailing space (e.g. from `set CYRUS_HOME=… &`) would
+    // otherwise produce a path that can't be created/located, silently failing
+    // extraction and dropping us to a PATH codex.
     let home = std::env::var("CYRUS_HOME")
         .ok()
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::home_dir().join(".cyrus"));

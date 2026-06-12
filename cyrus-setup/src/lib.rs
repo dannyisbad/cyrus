@@ -26,10 +26,12 @@ pub mod connector;
 pub mod embedded;
 pub mod secrets;
 pub mod stack;
+pub mod state;
 pub mod tunnel;
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// The page-context connector driver, embedded verbatim (the artifact proven
@@ -167,7 +169,8 @@ pub enum SetupEvent {
 
 /// Which tunnel lane to bring up. The TUI picks this (was an env var); the
 /// engine routes on it instead of auto-detecting when it's not `Auto`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TunnelChoice {
     /// Precedence ladder (env var / config presence). Backward-compatible default.
     #[default]
@@ -221,8 +224,12 @@ impl SetupOptions {
     }
 
     /// `~/.cyrus` — secrets, logs, and the dedicated Chrome profile live here.
+    /// `CYRUS_HOME` is trimmed: a trailing space (trivially introduced by a
+    /// `set CYRUS_HOME=… &` cmd one-liner) otherwise yields a bogus path that
+    /// silently breaks embedded extraction and connector lookup.
     pub fn cyrus_home(&self) -> PathBuf {
         if let Ok(h) = std::env::var("CYRUS_HOME") {
+            let h = h.trim();
             if !h.is_empty() {
                 return PathBuf::from(h);
             }
@@ -274,9 +281,47 @@ pub struct SetupOutcome {
 }
 
 /// Fast pass/fail for "is the stack already serving?" — the every-launch path.
-/// Does NOT touch Chrome or the connector; that's `ensure_all`'s job.
+/// Checks the two local servers AND that the recorded public tunnel still
+/// reaches our chimera (a dead tunnel means ChatGPT can't call the connector
+/// even though the local servers are up). Single-shot, no retry loop; does NOT
+/// touch Chrome or re-drive the connector — that's `ensure_all`/`repair_stack`.
 pub async fn health_check(opts: &SetupOptions) -> bool {
-    stack::chimera_alive(opts).await.is_some() && stack::lipsync_alive(opts).await
+    if stack::chimera_alive(opts).await.is_none() || !stack::lipsync_alive(opts).await {
+        return false;
+    }
+    // Enrolled implies a recorded connector; its public URL must still be live.
+    match connector::recorded_connector(opts) {
+        Some(rec) => tunnel::tunnel_alive(rec.mcp_url.trim_end_matches("/mcp")).await,
+        None => false,
+    }
+}
+
+/// Surgical self-heal for the launch path: bring the local stack (chimera +
+/// lipsync) back up against the recorded tunnel URL, restarting the tunnel
+/// first if it's down. Deliberately does NOT touch Chrome or re-drive the
+/// connector — those need a logged-in tab and belong to full `cyrus setup`. If
+/// the tunnel came back on a DIFFERENT URL (quick-tunnel churn), the connector
+/// is now stale and only setup can re-register it, so we say so instead of
+/// limping on.
+pub async fn repair_stack(opts: &SetupOptions) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let secrets = secrets::load_or_create(opts)?;
+    let rec = connector::recorded_connector(opts)
+        .context("cyrus is not set up (no recorded connector) — run `cyrus setup`")?;
+    let public_url = rec.mcp_url.trim_end_matches("/mcp").to_string();
+
+    if !tunnel::tunnel_alive(&public_url).await {
+        let out = tunnel::ensure_tunnel(opts).await?;
+        anyhow::ensure!(
+            out.public_url.trim_end_matches('/') == public_url,
+            "tunnel came back on a new URL ({} -> {}) — run `cyrus setup` to re-register the connector",
+            public_url,
+            out.public_url
+        );
+    }
+
+    stack::ensure_stack(opts, &secrets, &public_url).await?;
+    Ok(())
 }
 
 /// Probe every component and return a per-component snapshot for `cyrus check`.
@@ -365,16 +410,22 @@ pub async fn diagnose(opts: &SetupOptions) -> Diagnosis {
         }
     }
 
-    // codex provider config.
+    // codex provider. The `shadow` provider is injected at launch (per-invocation
+    // `-c`), never persisted — so "enrolled" is the recorded connector, not a
+    // block in config.toml. A stale persisted block (from an older cyrus) is
+    // worth flagging since it now just clutters the user's config.
     let want = format!("http://127.0.0.1:{}/v1", opts.shim_port);
-    let have = codex_config::current_provider_base_url();
+    let enrolled = connector::recorded_connector(opts).is_some();
+    let stale = codex_config::current_provider_base_url().is_some();
     components.push(ComponentHealth {
         name: "codex provider".to_string(),
-        ok: have.as_deref() == Some(want.as_str()),
-        detail: match have {
-            Some(url) if url == want => format!("shadow -> {url}"),
-            Some(url) => format!("shadow -> {url} (expected {want}; re-run setup)"),
-            None => "no `shadow` provider in codex config (run `cyrus setup`)".to_string(),
+        ok: enrolled,
+        detail: if !enrolled {
+            "not set up — run `cyrus setup`".to_string()
+        } else if stale {
+            format!("injected at launch ({want}) · stale block in config.toml — re-run setup to clean")
+        } else {
+            format!("injected at launch ({want})")
         },
     });
 
@@ -452,13 +503,25 @@ pub async fn ensure_all(
 
     emit(SetupEvent::StepStarted { step: Step::CodexConfig });
     let shim_base_url = format!("http://127.0.0.1:{}/v1", opts.shim_port);
-    let wrote = codex_config::ensure_shadow_provider(&shim_base_url)?;
+    // Nothing is persisted to the user's codex config: the wrapper injects the
+    // whole `shadow` provider as per-invocation `-c` overrides at launch, so a
+    // plain `codex` stays pristine. We DO strip any block an older cyrus wrote,
+    // and record the repair hints (tunnel lane + repo) cyrus needs to self-heal
+    // the stack on a later launch without asking again.
+    let removed = codex_config::remove_shadow_provider()?;
+    state::save(
+        opts,
+        &state::CyrusState {
+            repo_root: Some(opts.repo_root.clone()),
+            tunnel: opts.tunnel.clone(),
+        },
+    );
     emit(SetupEvent::StepDone {
         step: Step::CodexConfig,
-        detail: if wrote {
-            "wrote [model_providers.shadow] to codex config".to_string()
+        detail: if removed {
+            "provider injected at launch (removed the old persisted block)".to_string()
         } else {
-            "codex config already current".to_string()
+            "provider injected at launch (nothing written to your codex config)".to_string()
         },
     });
 

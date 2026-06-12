@@ -1,21 +1,18 @@
-//! `${CODEX_HOME}/config.toml` — write the `[model_providers.shadow]` entry
-//! the codex TUI's option 4 selects. Format-preserving (toml_edit) and
-//! idempotent: an entry that already matches is left untouched.
+//! `${CODEX_HOME}/config.toml` — cyrus no longer WRITES anything here. The
+//! `shadow` provider is injected by the wrapper as per-invocation `-c` overrides
+//! at launch, so a plain `codex` stays byte-for-byte pristine and "is cyrus set
+//! up?" is answered by cyrus's own home, never by this file. The only thing we
+//! touch config.toml for now is removing a stale `[model_providers.shadow]`
+//! block an OLDER cyrus persisted (format-preserving via toml_edit).
 
 use std::path::PathBuf;
 
 use anyhow::Context;
-use toml_edit::{table, value, DocumentMut};
+use toml_edit::DocumentMut;
 
 use crate::home_dir;
 
 pub const SHADOW_PROVIDER_ID: &str = "shadow";
-
-/// User-facing provider name shown in codex `/status` and at startup. Just the
-/// brand: "via ChatGPT" collides with codex's native ChatGPT sign-in (which mints
-/// an API token), and internal component names (chimera/lipsync) mean nothing to
-/// users — so the brand stands alone.
-const SHADOW_PROVIDER_NAME: &str = "cyrus";
 
 fn codex_config_path() -> PathBuf {
     let home = match std::env::var("CODEX_HOME") {
@@ -25,68 +22,31 @@ fn codex_config_path() -> PathBuf {
     home.join("config.toml")
 }
 
-/// Ensure `[model_providers.shadow]` points at the shim. Returns true when the
-/// file changed.
-pub fn ensure_shadow_provider(shim_base_url: &str) -> anyhow::Result<bool> {
+/// Remove a `[model_providers.shadow]` block a previous cyrus persisted, leaving
+/// the rest of config.toml byte-identical (toml_edit is format-preserving).
+/// Returns true when something was removed. A missing/unparseable file or an
+/// absent block is a no-op (`Ok(false)`) — there's nothing to clean.
+pub fn remove_shadow_provider() -> anyhow::Result<bool> {
     let path = codex_config_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut doc: DocumentMut = text
-        .parse()
-        .with_context(|| format!("parse {}", path.display()))?;
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let Ok(mut doc) = text.parse::<DocumentMut>() else {
+        // Don't fight a config we can't parse — leave it untouched.
+        return Ok(false);
+    };
 
-    let current = doc
-        .get("model_providers")
-        .and_then(|mp| mp.get(SHADOW_PROVIDER_ID))
-        .and_then(|p| p.get("base_url"))
-        .and_then(|v| v.as_str());
-    let current_auth = doc
-        .get("model_providers")
-        .and_then(|mp| mp.get(SHADOW_PROVIDER_ID))
-        .and_then(|p| p.get("requires_openai_auth"))
-        .and_then(|v| v.as_bool());
-    let current_name = doc
-        .get("model_providers")
-        .and_then(|mp| mp.get(SHADOW_PROVIDER_ID))
-        .and_then(|p| p.get("name"))
-        .and_then(|v| v.as_str());
-    if current == Some(shim_base_url)
-        && current_auth == Some(false)
-        && current_name == Some(SHADOW_PROVIDER_NAME)
-    {
+    let Some(mp) = doc.get_mut("model_providers").and_then(|mp| mp.as_table_mut()) else {
+        return Ok(false);
+    };
+    if mp.remove(SHADOW_PROVIDER_ID).is_none() {
         return Ok(false);
     }
-
-    if doc.get("model_providers").is_none() {
-        doc["model_providers"] = table();
-        // A bare [model_providers] header is noise; mark implicit so only the
-        // [model_providers.shadow] table renders.
-        if let Some(t) = doc["model_providers"].as_table_mut() {
-            t.set_implicit(true);
-        }
+    // Drop a now-empty [model_providers] header rather than leave the noise.
+    if mp.is_empty() {
+        doc.as_table_mut().remove("model_providers");
     }
-    let mp = doc["model_providers"]
-        .as_table_mut()
-        .context("model_providers is not a table in codex config.toml")?;
-    if mp.get(SHADOW_PROVIDER_ID).is_none() {
-        mp[SHADOW_PROVIDER_ID] = table();
-    }
-    let p = mp[SHADOW_PROVIDER_ID]
-        .as_table_mut()
-        .context("model_providers.shadow is not a table")?;
-    p["name"] = value(SHADOW_PROVIDER_NAME);
-    p["base_url"] = value(shim_base_url);
-    p["wire_api"] = value("responses");
-    p["requires_openai_auth"] = value(false);
 
-    // NOTE: cyrus-only session toggles (update-check off, memories/chronicle off)
-    // are NOT written here — the passthrough injects them as per-invocation `-c`
-    // overrides so they apply only when running through cyrus, never bleeding
-    // onto the user's plain `codex`. This block stays a pure provider definition
-    // (inert unless `model_provider=shadow` is selected).
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
     std::fs::write(&path, doc.to_string()).with_context(|| format!("write {}", path.display()))?;
     Ok(true)
 }
@@ -107,32 +67,53 @@ pub fn current_provider_base_url() -> Option<String> {
 mod tests {
     use super::*;
 
+    // Single test: these mutate the process-global CODEX_HOME, so they must not
+    // run alongside each other (parallel siblings would clobber the env). One
+    // sequential test keeps it the only CODEX_HOME mutator in the crate.
     #[test]
-    fn writes_and_is_idempotent() {
+    fn remove_strips_only_our_block_and_drops_empty_header() {
         let dir = std::env::temp_dir().join(format!("cyrus-setup-codexcfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("CODEX_HOME", &dir);
+        let cfg = dir.join("config.toml");
+
+        // Case 1: shadow alongside the user's keys + an unrelated provider that
+        // must survive, and the [model_providers] header must stay (other lives).
         std::fs::write(
-            dir.join("config.toml"),
-            "model = \"gpt-5.5\"\napproval_policy = \"never\"\n",
+            &cfg,
+            "model = \"gpt-5.5\"\n\
+             [model_providers.shadow]\n\
+             name = \"cyrus\"\n\
+             base_url = \"http://127.0.0.1:8765/v1\"\n\
+             requires_openai_auth = false\n\
+             [model_providers.other]\n\
+             name = \"keepme\"\n",
         )
         .unwrap();
 
-        let changed = ensure_shadow_provider("http://127.0.0.1:8765/v1").unwrap();
-        assert!(changed);
-        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
-        assert!(text.contains("[model_providers.shadow]"));
-        assert!(text.contains("base_url = \"http://127.0.0.1:8765/v1\""));
-        assert!(text.contains("requires_openai_auth = false"));
-        assert!(text.contains("name = \"cyrus\""));
-        // session toggles are NOT persisted here (injected as -c by passthrough)
-        assert!(!text.contains("memories"));
-        assert!(!text.contains("check_for_update_on_startup"));
-        // user's existing keys preserved
+        assert!(remove_shadow_provider().unwrap());
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(!text.contains("model_providers.shadow"));
+        assert!(!text.contains("127.0.0.1:8765"));
         assert!(text.contains("model = \"gpt-5.5\""));
+        assert!(text.contains("[model_providers.other]"));
+        assert!(text.contains("keepme"));
+        assert_eq!(current_provider_base_url(), None);
+        // second pass is a clean no-op.
+        assert!(!remove_shadow_provider().unwrap());
 
-        let changed2 = ensure_shadow_provider("http://127.0.0.1:8765/v1").unwrap();
-        assert!(!changed2);
+        // Case 2: shadow is the ONLY provider — the bare header goes too.
+        std::fs::write(
+            &cfg,
+            "model = \"gpt-5.5\"\n\
+             [model_providers.shadow]\n\
+             base_url = \"http://127.0.0.1:8765/v1\"\n",
+        )
+        .unwrap();
+        assert!(remove_shadow_provider().unwrap());
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(!text.contains("model_providers"));
+        assert!(text.contains("model = \"gpt-5.5\""));
 
         std::env::remove_var("CODEX_HOME");
         let _ = std::fs::remove_dir_all(dir);

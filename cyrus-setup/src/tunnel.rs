@@ -306,9 +306,25 @@ async fn cloudflared_quick(opts: &SetupOptions) -> anyhow::Result<TunnelOutcome>
         "cloudflared not found — install it (winget install Cloudflare.cloudflared) and re-run",
     )?;
     let log = opts.cyrus_home().join("logs/cloudflared-quick.log");
+
+    // Isolate from any existing `~/.cloudflared/config.yml`. If the user already
+    // runs a NAMED cloudflared tunnel, cloudflared would otherwise inherit its
+    // config + credentials here and register this ephemeral quick tunnel under
+    // the named tunnel's account — so the fresh trycloudflare URL 404s at the
+    // Cloudflare edge (it never routes to our origin). An empty `--config`
+    // forces a clean quick tunnel. (A true fresh user has no config to inherit,
+    // so this is a no-op for them.)
+    let empty_cfg = opts.cyrus_home().join("cloudflared-quick.empty.yml");
+    if let Some(parent) = empty_cfg.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&empty_cfg, "").ok();
+
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("tunnel")
         .arg("--no-autoupdate")
+        .arg("--config")
+        .arg(&empty_cfg)
         .arg("--url")
         .arg(format!("http://127.0.0.1:{}", opts.chimera_port));
     spawn_detached(cmd, log.clone())?;
@@ -483,6 +499,22 @@ fn extract_trycloudflare_url(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Single-shot "does the public URL still reach OUR chimera right now?" — the
+/// launch-path probe (no retry loop, tight timeout). A dead tunnel, a churned
+/// URL, or a foreign service answering the host all return false. Confirms
+/// chimera's identity in the body so a 530/placeholder edge can't pass.
+pub async fn tunnel_alive(public_url: &str) -> bool {
+    let res = reqwest::Client::new()
+        .get(format!("{}/", public_url.trim_end_matches('/')))
+        .timeout(Duration::from_secs(6))
+        .send()
+        .await;
+    match res {
+        Ok(r) => r.text().await.map(|b| b.contains("repo-agent-mcp")).unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 /// The end-to-end proof: the public hostname reaches OUR chimera.

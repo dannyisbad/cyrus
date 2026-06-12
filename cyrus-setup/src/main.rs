@@ -230,35 +230,76 @@ async fn run_cyrus_command() -> ExitCode {
 // codex passthrough — cyrus as a front door to codex
 // ---------------------------------------------------------------------------
 
-/// Run `codex` with the user's args. Marks the launch as cyrus-wrapped (so our
-/// codex fork force-shows the cyrus onboarding when shadow isn't set up yet,
-/// regardless of OpenAI auth), injects `-c model_provider=shadow` once cyrus is
-/// configured, and applies the cyrus-only config toggles as per-invocation
-/// overrides — NOT persisted to config.toml, so a plain `codex` keeps its own
-/// update-check / memories / chronicle. The exit code is codex's.
+/// Run `codex` with the user's args. The launch model, end to end:
+///
+///   * `CYRUS_WRAPPED=1` always — our codex fork's onboarding gate keys on it
+///     plus `model_provider_id`, so leaving the provider unselected (below) is
+///     what force-shows the cyrus setup flow for a not-yet-enrolled user.
+///   * The whole `shadow` provider DEFINITION is injected as `-c` overrides on
+///     EVERY launch (session-only, never written to config.toml). Enrolled or
+///     not, the definition has to exist so codex can resolve it — when enrolled
+///     we select it now, and when onboarding completes mid-session codex reloads
+///     with these same overrides and switches onto it.
+///   * `-c model_provider=shadow` (the SELECTION) is added only when enrolled.
+///     Enrollment is cyrus's own state (`~/.cyrus`), never the codex config.
+///   * Before handing off an enrolled launch, the stack is health-checked and
+///     self-healed if it flaked — never bouncing the user back to onboarding.
+///
+/// The exit code is codex's.
 fn passthrough_to_codex() -> ExitCode {
     let user_args: Vec<String> = std::env::args().skip(1).collect();
-    let configured = cyrus_engine::codex_config::current_provider_base_url().is_some();
 
-    passthrough_banner(configured);
+    // cyrus's own home (not the codex config) is the source of truth for "is
+    // this user set up?". Ports/home don't depend on the repo, so default
+    // options on the cwd are enough to read enrollment and repair the stack.
+    let opts = SetupOptions::new(std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let enrolled = cyrus_engine::connector::recorded_connector(&opts).is_some();
 
-    let mut cmd = codex_command();
+    passthrough_banner(enrolled);
+
+    let mut cmd = match codex_command() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cyrus: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     cmd.env("CYRUS_WRAPPED", "1");
-    // Injected before the user's args so an explicit `-c ...` they pass still
-    // takes precedence.
-    if configured {
-        cmd.arg("-c").arg("model_provider=shadow");
+    // Tell the embedded codex where THIS cyrus binary is. The onboarding flow
+    // spawns `cyrus setup` via `locate_cyrus_bin()`, which checks `CYRUS_BIN`
+    // first — without it, codex (running as an extracted `…/bin/codex-*.exe`)
+    // has no sibling `cyrus` and falls back to a bare `cyrus` on PATH that isn't
+    // installed → "cyrus not found". Point it back at ourselves (the busybox
+    // that owns `setup`/`chimera`/`lipsync`).
+    if let Ok(self_exe) = std::env::current_exe() {
+        cmd.env("CYRUS_BIN", self_exe);
     }
-    // Cyrus-session config (scoped here, never written to the user's config.toml):
-    // the memory/chronicle background calls burn ChatGPT quota, and the update
-    // check polls openai/codex for a fork that's none of the user's business.
-    for kv in [
-        "check_for_update_on_startup=false",
-        "features.memories=false",
-        "features.chronicle=false",
-    ] {
+
+    // Provider definition + cyrus-session toggles, injected before the user's
+    // args so an explicit `-c ...` they pass still wins. The memory/chronicle
+    // background calls burn ChatGPT quota; the update check polls for a fork
+    // that's none of the user's business — both off, scoped to cyrus only.
+    let shim_base_url = format!("http://127.0.0.1:{}/v1", opts.shim_port);
+    let overrides = [
+        "model_providers.shadow.name=\"cyrus\"".to_string(),
+        format!("model_providers.shadow.base_url=\"{shim_base_url}\""),
+        "model_providers.shadow.wire_api=\"responses\"".to_string(),
+        "model_providers.shadow.requires_openai_auth=false".to_string(),
+        "check_for_update_on_startup=false".to_string(),
+        "features.memories=false".to_string(),
+        "features.chronicle=false".to_string(),
+    ];
+    for kv in &overrides {
         cmd.arg("-c").arg(kv);
     }
+
+    if enrolled {
+        ensure_serving_or_repair(&opts);
+        cmd.arg("-c").arg("model_provider=shadow");
+    }
+    // else: leave the provider UNSELECTED so the fork's gate force-shows the
+    // cyrus setup flow (CYRUS_WRAPPED + model_provider_id != "shadow").
+
     cmd.args(&user_args);
 
     match cmd.status() {
@@ -276,38 +317,107 @@ fn passthrough_to_codex() -> ExitCode {
     }
 }
 
-/// Build the `Command` that runs codex, resolving it robustly:
-/// `CYRUS_CODEX_BIN` → the embedded codex (single-binary builds) → a `codex`
-/// next to our exe (bundle layout) → a PATH search that honors Windows `PATHEXT`
-/// (so an npm `codex.cmd` shim is found and launched via `cmd /C`).
+/// Enrolled-launch guard: confirm the stack is actually serving (local servers
+/// AND the public tunnel reaches chimera) and self-heal a flake in place. A
+/// transient failure self-heals; a structural one (tunnel URL churned) prints
+/// guidance and lets codex surface the model error rather than hard-blocking.
+fn ensure_serving_or_repair(opts: &SetupOptions) {
+    let Ok(rt) = tokio::runtime::Builder::new_multi_thread().enable_all().build() else {
+        return; // can't probe — let codex try and surface any error itself.
+    };
+    rt.block_on(async {
+        if cyrus_engine::health_check(opts).await {
+            return;
+        }
+        eprintln!("\x1b[2mcyrus › stack is down — repairing…\x1b[0m");
+        // Repair against the lane + repo the user set up with, not the cwd.
+        let st = cyrus_engine::state::load(opts);
+        let repair_opts = SetupOptions {
+            repo_root: st.repo_root.unwrap_or_else(|| opts.repo_root.clone()),
+            tunnel: st.tunnel,
+            ..opts.clone()
+        };
+        match cyrus_engine::repair_stack(&repair_opts).await {
+            Ok(()) => eprintln!("\x1b[2mcyrus › stack repaired\x1b[0m"),
+            Err(e) => eprintln!(
+                "cyrus: couldn't auto-repair the stack: {e:#}\n      run `cyrus setup` to fix it."
+            ),
+        }
+    });
+}
+
+/// Resolve which codex to launch. Resolution order and, critically, the failure
+/// mode differ by build:
 ///
-/// The embedded copy is preferred over PATH so a stray `npm` codex can never
-/// shadow the patched fork; `CYRUS_CODEX_BIN` still overrides it for dev.
-fn codex_command() -> std::process::Command {
+///   1. `CYRUS_CODEX_BIN` (dev override) — always wins; a missing path is a hard
+///      error, never a silent fall-through.
+///   2. **Single-binary build** (`has_embedded_codex()`): the embedded fork is
+///      MANDATORY. We NEVER fall back to a PATH `codex` — a stray npm codex
+///      shadowing the patched fork is the exact failure embedding exists to
+///      prevent, and a silent downgrade to an unpatched codex (no cyrus gate, no
+///      provider switch) looks identical to "cyrus is broken". If extraction
+///      fails, that's a loud error with the likely cause.
+///   3. **Dev build** (nothing embedded): sibling `codex(.exe)` → PATH search
+///      (honoring Windows `PATHEXT`, so an npm `codex.cmd` is run via `cmd /C`).
+///
+/// Returns the resolved program path alongside the command for an optional
+/// `CYRUS_DEBUG` trace, so "which codex actually ran" is never a mystery again.
+fn codex_command() -> Result<std::process::Command, String> {
     use std::path::PathBuf;
     use std::process::Command;
 
+    // 1. Explicit dev override.
     if let Some(p) = std::env::var_os("CYRUS_CODEX_BIN") {
-        let p = PathBuf::from(p);
+        let p = PathBuf::from(p.to_string_lossy().trim().to_string());
         if p.exists() {
-            return wrap_for_shim(p);
+            return Ok(debug_codex(wrap_for_shim(p)));
         }
+        return Err(format!(
+            "CYRUS_CODEX_BIN is set but points at a missing file: {}",
+            p.display()
+        ));
     }
-    if let Some(extracted) = cyrus_engine::embedded::embedded_codex_path() {
-        return Command::new(extracted);
+
+    // 2. Ship build: embedded is the only acceptable codex.
+    if cyrus_engine::embedded::has_embedded_codex() {
+        return match cyrus_engine::embedded::embedded_codex_path() {
+            Some(extracted) => Ok(debug_codex(Command::new(extracted))),
+            None => Err(
+                "this cyrus embeds codex but couldn't extract it to ~/.cyrus/bin. \
+                 Check free disk space and write permissions there — and that CYRUS_HOME, \
+                 if set, has no trailing space. (Refusing to fall back to a PATH `codex`, \
+                 which would silently run an unpatched build with no cyrus integration.)"
+                    .into(),
+            ),
+        };
     }
+
+    // 3. Dev build: sibling, then PATH.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let sib = dir.join(if cfg!(windows) { "codex.exe" } else { "codex" });
             if sib.exists() {
-                return Command::new(sib);
+                return Ok(debug_codex(Command::new(sib)));
             }
         }
     }
     if let Some(found) = which_in_path("codex") {
-        return wrap_for_shim(found);
+        return Ok(debug_codex(wrap_for_shim(found)));
     }
-    Command::new(if cfg!(windows) { "codex.exe" } else { "codex" })
+    Ok(debug_codex(Command::new(if cfg!(windows) {
+        "codex.exe"
+    } else {
+        "codex"
+    })))
+}
+
+/// When `CYRUS_DEBUG` is set, print the codex binary we resolved to (dim, on
+/// stderr) so a wrong-codex problem is one run away from being obvious.
+fn debug_codex(cmd: std::process::Command) -> std::process::Command {
+    if std::env::var_os("CYRUS_DEBUG").is_some() {
+        eprintln!("\x1b[2mcyrus › launching codex: {}\x1b[0m", cmd.get_program().to_string_lossy());
+    }
+    cmd
 }
 
 /// On Windows a `.cmd`/`.bat` shim (e.g. npm's `codex.cmd`) can't be launched by
@@ -359,10 +469,10 @@ fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
 
 /// One dim line on stderr so it's always obvious cyrus handed off to codex, and
 /// which provider is in play.
-fn passthrough_banner(configured: bool) {
+fn passthrough_banner(enrolled: bool) {
     use std::io::IsTerminal;
     let dim = std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal();
-    let line = if configured {
+    let line = if enrolled {
         "cyrus › codex — running on cyrus.  cyrus commands: setup · check"
     } else {
         "cyrus › codex — default provider.  run `cyrus setup` to switch to cyrus"
