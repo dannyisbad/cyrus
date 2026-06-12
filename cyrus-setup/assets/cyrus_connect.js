@@ -179,7 +179,26 @@
 
     const oauthConfig = await discoverOAuth(mcpUrl);   // requires server SSE + WWW-Authenticate fixes
     await callbackId(mcpUrl);                           // hydrate (not strictly required)
-    const connector = await createConnector(name, mcpUrl, oauthConfig);
+
+    let connector;
+    try {
+      connector = await createConnector(name, mcpUrl, oauthConfig);
+    } catch (e) {
+      // ChatGPT enforces unique connector NAMES. A 409 here means a connector
+      // with this name already exists at a DIFFERENT url — a stale cyrus
+      // connector from a previous tunnel whose local record we lost (so the
+      // exact-url dedupe above couldn't retire it). The name is cyrus's own
+      // (default "repo"), so reclaim it: delete the duplicate and recreate at
+      // the current url. We match on name AND mcp type AND a different base_url,
+      // so a user's unrelated connector is never touched.
+      if (!/ -> 409\b/.test(String(e && e.message))) throw e;
+      const dup = (await listConnectors()).find(
+        (c) => c && c.connector_type === "MCP" && c.name === name && c.base_url !== mcpUrl
+      );
+      if (!dup) throw e;
+      await deleteConnector(dup.id);
+      connector = await createConnector(name, mcpUrl, oauthConfig);
+    }
     return { connectorId: connector.id };
   }
 
