@@ -8,21 +8,26 @@
 # Order matters: codex is built first because cyrus's build.rs reads its bytes.
 #
 # Usage:  pwsh scripts/release.ps1            # release single-binary into ./dist
-#         pwsh scripts/release.ps1 -Debug     # faster debug single-binary
+#         pwsh scripts/release.ps1 -DebugBuild # faster debug single-binary
 #         pwsh scripts/release.ps1 -Separate  # old side-by-side layout (no embed)
 
 [CmdletBinding()]
 param(
-    [switch]$Debug,
+    [switch]$DebugBuild,
     [switch]$Separate,
-    [string]$OutDir   = (Join-Path $PSScriptRoot '..' 'dist'),
-    [string]$BuildDir = (Join-Path $env:TEMP 'cyrus-codex-build')
+    [string]$OutDir,
+    [string]$BuildDir
 )
 
 $ErrorActionPreference = 'Stop'
-$root        = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$profileFlag = if ($Debug) { '' } else { '--release' }
-$profileDir  = if ($Debug) { 'debug' } else { 'release' }
+# Computed in the body (not param defaults): $PSScriptRoot isn't reliably set in
+# a param default under Windows PowerShell, and Join-Path there only takes two
+# path segments — so build paths up explicitly here.
+$root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if (-not $OutDir)   { $OutDir   = Join-Path $root 'dist' }
+if (-not $BuildDir) { $BuildDir = Join-Path $env:TEMP 'cyrus-codex-build' }
+$profileFlag = if ($DebugBuild) { '' } else { '--release' }
+$profileDir  = if ($DebugBuild) { 'debug' } else { 'release' }
 
 # --- 1. parse scripts/codex.lock -------------------------------------------
 $cfg = @{}
@@ -44,8 +49,14 @@ $haveSha = (git -C $BuildDir rev-parse HEAD).Trim()
 if ($haveSha -ne $sha) { throw "codex checkout is $haveSha, expected pinned $sha" }
 
 Write-Host "building codex ($profileDir) ..." -ForegroundColor Cyan
-& cargo build $profileFlag --manifest-path (Join-Path $BuildDir 'codex-rs' 'Cargo.toml') --bin codex
-if ($LASTEXITCODE) { throw "codex build failed ($LASTEXITCODE)" }
+# Build from INSIDE codex-rs so its rust-toolchain.toml is honored (codex pins a
+# newer rustc for sqlx; --manifest-path alone uses the default toolchain).
+Push-Location (Join-Path $BuildDir 'codex-rs')
+try {
+    & cargo build $profileFlag --bin codex
+    if ($LASTEXITCODE) { throw "codex build failed ($LASTEXITCODE)" }
+}
+finally { Pop-Location }
 $codexExe = Join-Path $BuildDir "codex-rs\target\$profileDir\codex.exe"
 if (-not (Test-Path $codexExe)) { throw "codex.exe not found at $codexExe" }
 
@@ -61,8 +72,12 @@ New-Item -ItemType Directory -Force $OutDir | Out-Null
 if ($Separate) {
     # Old layout: cyrus.exe + codex.exe (+ cloudflared) side by side, no embed.
     Write-Host "building cyrus ($profileDir, separate) ..." -ForegroundColor Cyan
-    & cargo build $profileFlag --manifest-path (Join-Path $root 'Cargo.toml') -p cyrus-setup --bin cyrus
-    if ($LASTEXITCODE) { throw "cyrus build failed ($LASTEXITCODE)" }
+    Push-Location $root
+    try {
+        & cargo build $profileFlag -p cyrus-setup --bin cyrus
+        if ($LASTEXITCODE) { throw "cyrus build failed ($LASTEXITCODE)" }
+    }
+    finally { Pop-Location }
     Copy-Item (Join-Path $root "target\$profileDir\cyrus.exe") $OutDir -Force
     Copy-Item $codexExe $OutDir -Force
     if ($cfExe) { Copy-Item $cfExe $OutDir -Force }
@@ -72,11 +87,13 @@ else {
     Write-Host "building cyrus ($profileDir, single-binary, embedding codex$(if($cfExe){' + cloudflared'})) ..." -ForegroundColor Cyan
     $env:CYRUS_EMBED_CODEX = $codexExe
     if ($cfExe) { $env:CYRUS_EMBED_CLOUDFLARED = $cfExe } else { Remove-Item Env:\CYRUS_EMBED_CLOUDFLARED -ErrorAction SilentlyContinue }
+    Push-Location $root
     try {
-        & cargo build $profileFlag --manifest-path (Join-Path $root 'Cargo.toml') -p cyrus-setup --bin cyrus
+        & cargo build $profileFlag -p cyrus-setup --bin cyrus
         if ($LASTEXITCODE) { throw "cyrus build failed ($LASTEXITCODE)" }
     }
     finally {
+        Pop-Location
         Remove-Item Env:\CYRUS_EMBED_CODEX -ErrorAction SilentlyContinue
         Remove-Item Env:\CYRUS_EMBED_CLOUDFLARED -ErrorAction SilentlyContinue
     }
