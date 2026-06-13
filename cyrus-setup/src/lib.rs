@@ -69,9 +69,9 @@ impl Step {
         match self {
             Step::Secrets => "Preparing credentials",
             Step::Chrome => "Connecting to Chrome (your ChatGPT login)",
-            Step::Tunnel => "Opening the public tunnel",
+            Step::Tunnel => "Opening the public tunnel (this can take a minute or two)",
             Step::Stack => "Starting the local servers",
-            Step::Connector => "Wiring the ChatGPT connector",
+            Step::Connector => "Wiring the ChatGPT connector (this can take a minute or two)",
             Step::CodexConfig => "Configuring codex",
         }
     }

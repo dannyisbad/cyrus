@@ -145,7 +145,7 @@ fn step_verbs(step: Step) -> (&'static str, &'static str, &'static str) {
         Step::Tunnel => (
             "Opening",
             "Opened",
-            "a public HTTPS URL for the connector",
+            "a public HTTPS URL for the connector (this can take a minute or two)",
         ),
         Step::Stack => (
             "Starting",
@@ -155,7 +155,7 @@ fn step_verbs(step: Step) -> (&'static str, &'static str, &'static str) {
         Step::Connector => (
             "Wiring",
             "Wired",
-            "registering the MCP connector on ChatGPT",
+            "registering the MCP connector — this can take a minute or two",
         ),
         Step::CodexConfig => (
             "Configuring",
