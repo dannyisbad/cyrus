@@ -186,6 +186,28 @@ impl ChatSurface for PageSurface {
             .map(str::to_string))
     }
 
+    /// PATCH a conversation's title via the web app's own backend, authed with
+    /// the page session. Best-effort: a non-2xx just leaves the chat unnamed.
+    async fn set_conversation_title(&self, conv_id: &str, title: &str) -> anyhow::Result<()> {
+        let id = serde_json::to_string(conv_id)?;
+        let t = serde_json::to_string(title)?;
+        let js = [
+            "(async()=>{try{",
+            "const s=await (await fetch('/api/auth/session')).json();const tok=s.accessToken;",
+            "const r=await fetch('/backend-api/conversation/'+encodeURIComponent(",
+            &id,
+            "),{method:'PATCH',",
+            "headers:{'Authorization':'Bearer '+tok,'Content-Type':'application/json'},credentials:'include',",
+            "body:JSON.stringify({title:",
+            &t,
+            "})});return 'ok:'+r.status;",
+            "}catch(e){return 'err:'+e.message;}})()",
+        ]
+        .concat();
+        let _ = self.cdp.eval(&js, 15.0).await?;
+        Ok(())
+    }
+
     async fn wait_composer(&self) -> anyhow::Result<()> {
         // chat.py returns a bool; the Python callers proceed regardless, so the
         // adapter mirrors that (a timed-out composer is not an error).

@@ -307,6 +307,13 @@ pub trait ChatSurface: Send + Sync {
     async fn current_conversation_id(&self) -> anyhow::Result<Option<String>>;
     /// Create a memory-off ChatGPT Project and return its gizmo id (chat.create_project).
     async fn create_project(&self, name: &str) -> anyhow::Result<Option<String>>;
+    /// Rename a conversation by id (PATCH /backend-api/conversation/{id}). Used to
+    /// name plain conversations `[proj: <repo>]` for grouping when we deliberately
+    /// don't scope them into a real Project. Default no-op so mocks/tests are
+    /// unaffected; best-effort at the call site.
+    async fn set_conversation_title(&self, _conv_id: &str, _title: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// Wait until the composer is ready after a (re)load (chat._wait_composer).
     async fn wait_composer(&self) -> anyhow::Result<()>;
     /// Whether the page session is logged in (the `/api/auth/session` probe the
@@ -532,6 +539,11 @@ pub struct ThreadConductor {
     gizmo: Mutex<Option<String>>,
     /// per-folder resolution runs once per thread (`_project_resolved`).
     project_resolved: Mutex<bool>,
+    /// Pending `[proj: <repo>]` title for this thread's conversation. Replaces
+    /// gizmo scoping on the critical path: the conversation is created PLAIN
+    /// (never gated on a Project that might 404), then named once it exists.
+    proj_title: Mutex<Option<String>>,
+    title_applied: Mutex<bool>,
 
     // --- conductor state ---
     /// The MERGED per-turn stream (`_events`): Token | Call, order preserved.
@@ -587,6 +599,8 @@ impl ThreadConductor {
             protocol_sent: Mutex::new(false),
             gizmo: Mutex::new(None),
             project_resolved: Mutex::new(false),
+            proj_title: Mutex::new(None),
+            title_applied: Mutex::new(false),
             events_tx: Mutex::new(None),
             events_rx: Mutex::new(None),
             inflight_call: Mutex::new(None),
@@ -781,6 +795,17 @@ impl ThreadConductor {
             }
             return Ok(());
         }
+        // We deliberately do NOT auto-create/scope a real ChatGPT Project here.
+        // A per-folder gizmo on a FRESH account can make the conversation-create
+        // POST 404 ("project not found") — the chat is never born and not a
+        // single event streams (the failure that strands new users). Project
+        // membership is an ORGANIZATION feature; it must never sit on the
+        // critical path of getting a model response. So the conversation is
+        // created PLAIN and named `[proj: <repo>]` for grouping once it exists.
+        //
+        // Escape hatches: an explicit `SHIM_PROJECT_GIZMO` pin (applied at boot)
+        // still scopes for opt-in power users; `SHIM_PROJECT_PER_FOLDER=0` turns
+        // the naming off entirely.
         let per_folder_off = std::env::var("SHIM_PROJECT_PER_FOLDER")
             .map(|v| v == "0")
             .unwrap_or(false);
@@ -791,33 +816,30 @@ impl ThreadConductor {
             Some(c) => c,
             None => return Ok(()),
         };
-        let chat = match self.chat.lock().await.clone() {
-            Some(c) => c,
-            None => return Ok(()),
-        };
-        let giz = self.shim.resolve_project(&cwd, &chat).await?;
-        if let Some(giz) = giz {
-            *self.gizmo.lock().await = Some(giz.clone());
-            // Default: history ON, so the conversation is SAVED INTO the project
-            // and shows up under it. `history_and_training_disabled=true` makes
-            // each turn an ephemeral temp-chat — it runs but is never persisted
-            // into the project (and the temp-chat flag can disable the MCP
-            // connector). The project already isolates memory via
-            // memory_scope=project_v2, so this flag is redundant here. Opt back
-            // into ephemeral turns with SHIM_NO_HISTORY=1.
-            let no_hist = matches!(
-                std::env::var("SHIM_NO_HISTORY").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE")
-            );
-            chat.set_overrides(ChatOverrides {
-                model: Some(self.model.clone()),
-                thinking_effort: self.effort.clone(),
-                gizmo_id: Some(giz),
-                no_history: Some(no_hist),
-            })
-            .await?;
-        }
+        *self.proj_title.lock().await =
+            Some(format!("[proj: {}]", project_name_for_cwd(&cwd)));
         Ok(())
+    }
+
+    /// Best-effort, once: name this thread's conversation `[proj: <repo>]` after
+    /// it exists. The conversation is born on the first turn, so this no-ops
+    /// until `current_conversation_id` resolves, then renames and latches.
+    async fn apply_pending_title(&self) {
+        if *self.title_applied.lock().await {
+            return;
+        }
+        let Some(title) = self.proj_title.lock().await.clone() else {
+            return;
+        };
+        let Some(chat) = self.chat.lock().await.clone() else {
+            return;
+        };
+        if let Ok(Some(conv_id)) = chat.current_conversation_id().await {
+            match chat.set_conversation_title(&conv_id, &title).await {
+                Ok(()) => *self.title_applied.lock().await = true,
+                Err(e) => tracing::warn!("[shim] set conversation title failed: {e}"),
+            }
+        }
     }
 
     // ----- boot -----
@@ -1688,6 +1710,9 @@ connector-tool activity) — likely rate-limited or stalled; turn aborted, retry
             self.reset_turn_state().await;
             return Err(e);
         }
+        // The conversation exists now (created on the first inject); name it
+        // `[proj: <repo>]` if pending. Best-effort, latches after the first hit.
+        self.apply_pending_title().await;
         send_frame(tx, completed(&response_id)).await;
         Ok(())
     }
