@@ -153,7 +153,7 @@ async fn tunnel_registered(public_url: &str) -> bool {
     }
 }
 
-fn spawn_detached(mut cmd: std::process::Command, log: PathBuf) -> anyhow::Result<()> {
+fn spawn_detached(mut cmd: std::process::Command, log: PathBuf) -> anyhow::Result<u32> {
     if let Some(parent) = log.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -166,8 +166,8 @@ fn spawn_detached(mut cmd: std::process::Command, log: PathBuf) -> anyhow::Resul
         // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP — child outlives us.
         cmd.creation_flags(0x0800_0200);
     }
-    cmd.spawn().context("spawn tunnel agent")?;
-    Ok(())
+    let child = cmd.spawn().context("spawn tunnel agent")?;
+    Ok(child.id())
 }
 
 /// Provider precedence (stability first; ngrok-static is the recommended path):
@@ -327,7 +327,10 @@ async fn cloudflared_quick(opts: &SetupOptions) -> anyhow::Result<TunnelOutcome>
         .arg(&empty_cfg)
         .arg("--url")
         .arg(format!("http://127.0.0.1:{}", opts.chimera_port));
-    spawn_detached(cmd, log.clone())?;
+    let pid = spawn_detached(cmd, log.clone())?;
+    // Record the ephemeral tunnel's pid so the session-end teardown can close
+    // this throwaway public socket (a NAMED tunnel is the user's own; we don't).
+    let _ = std::fs::write(opts.cyrus_home().join("quick-tunnel.pid"), pid.to_string());
 
     // cloudflared prints the assigned URL into its log; poll-parse it.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(45);

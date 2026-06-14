@@ -303,7 +303,18 @@ fn passthrough_to_codex() -> ExitCode {
     cmd.args(&user_args);
 
     match cmd.status() {
-        Ok(status) => ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8),
+        Ok(status) => {
+            // Codex ran and exited — tear down chimera + lipsync so they don't
+            // outlive the session holding this binary open (and locking dist on a
+            // rebuild). The tunnel is intentionally left up: its public URL must
+            // survive for the connector, and killing it churns a new quick-tunnel
+            // URL each launch. Opt out with CYRUS_KEEP_STACK=1 to keep the servers
+            // resident across sessions.
+            if std::env::var_os("CYRUS_KEEP_STACK").is_none() {
+                cyrus_engine::stack::stop_servers(&opts);
+            }
+            ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             eprintln!(
                 "cyrus: could not find `codex`. Install it, or point CYRUS_CODEX_BIN at the binary."

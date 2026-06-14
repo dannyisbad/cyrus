@@ -179,6 +179,57 @@ fn kill_port_owner(_port: u16, _expect_image: &str) -> anyhow::Result<()> {
     anyhow::bail!("stale stack instance on the port — stop it manually and re-run setup")
 }
 
+/// Best-effort teardown of OUR chimera + lipsync (kill the cyrus-image owner of
+/// each local port). Called when the codex session that wanted them exits: the
+/// local servers are cheap to respawn and shouldn't outlive the session holding
+/// the cyrus binary open. The TUNNEL is deliberately NOT touched — its public
+/// URL (and the connector registered against it) must survive across relaunches,
+/// or every restart churns a fresh quick-tunnel URL and strands the connector.
+pub fn stop_servers(opts: &SetupOptions) {
+    let image = cyrus_image(opts);
+    for port in [opts.chimera_port, opts.shim_port] {
+        // kill_port_owner refuses foreign images and no-ops an empty port, so a
+        // bare `let _ =` is the right best-effort: only ever kills our own.
+        let _ = kill_port_owner(port, &image);
+    }
+    // Defense-in-depth: also close the EPHEMERAL quick tunnel cyrus spawned (a
+    // disposable public socket). With chimera already dead there's nothing behind
+    // it, but a throwaway socket shouldn't linger. A NAMED/user tunnel is left
+    // running — it's the user's own auth'd infra with a stable URL.
+    kill_quick_tunnel(opts);
+}
+
+/// Kill the cyrus-spawned QUICK (ephemeral trycloudflare) tunnel via the pid it
+/// recorded at spawn, guarded against pid-reuse by confirming the image is still
+/// cloudflared. No pid file (or a named tunnel) -> no-op.
+#[cfg(windows)]
+fn kill_quick_tunnel(opts: &SetupOptions) {
+    let pid_file = opts.cyrus_home().join("quick-tunnel.pid");
+    let Ok(s) = std::fs::read_to_string(&pid_file) else {
+        return;
+    };
+    let Ok(pid) = s.trim().parse::<u32>() else {
+        return;
+    };
+    if let Ok(out) = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+    {
+        if String::from_utf8_lossy(&out.stdout)
+            .to_ascii_lowercase()
+            .contains("cloudflared")
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .output();
+        }
+    }
+    let _ = std::fs::remove_file(&pid_file);
+}
+
+#[cfg(not(windows))]
+fn kill_quick_tunnel(_opts: &SetupOptions) {}
+
 async fn poll_until<F, Fut>(what: &str, secs: u64, mut f: F) -> anyhow::Result<()>
 where
     F: FnMut() -> Fut,
