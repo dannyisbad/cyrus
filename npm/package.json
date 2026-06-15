@@ -1,0 +1,31 @@
+{
+  "name": "@mundy/cyrus",
+  "version": "0.1.0",
+  "description": "Run the real Codex CLI on your ChatGPT subscription — one self-contained binary.",
+  "bin": {
+    "cyrus": "bin/cyrus.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dannyisbad/cyrus.git"
+  },
+  "homepage": "https://github.com/dannyisbad/cyrus#readme",
+  "bugs": {
+    "url": "https://github.com/dannyisbad/cyrus/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "chatgpt",
+    "cli",
+    "ai",
+    "coding-agent",
+    "openai"
+  ]
+}

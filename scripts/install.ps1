@@ -1,6 +1,6 @@
 # cyrus installer (Windows).
 #
-#   irm https://mundy.sh/install/cyrus.ps1 | iex
+#   irm https://github.com/dannyisbad/cyrus/releases/latest/download/install.ps1 | iex
 #
 # Downloads the matching self-contained cyrus.exe from the latest GitHub release,
 # drops it in %USERPROFILE%\.cyrus\bin, and adds that to your user PATH. One file,

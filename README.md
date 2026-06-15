@@ -70,12 +70,16 @@ Install (one self-contained binary — codex and cloudflared are embedded, nothi
 else to fetch):
 
 ```sh
-# macOS / Linux
-curl -fsSL https://mundy.sh/install/cyrus | sh
+# with Node
+npx @mundy/cyrus setup
+```
+```sh
+# macOS / Linux — no Node required
+curl -fsSL https://github.com/dannyisbad/cyrus/releases/latest/download/install.sh | sh
 ```
 ```powershell
 # Windows (PowerShell)
-irm https://mundy.sh/install/cyrus.ps1 | iex
+irm https://github.com/dannyisbad/cyrus/releases/latest/download/install.ps1 | iex
 ```
 
 Then connect your ChatGPT session once and go:

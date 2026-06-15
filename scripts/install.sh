@@ -1,7 +1,7 @@
 #!/bin/sh
 # cyrus installer.
 #
-#   curl -fsSL https://mundy.sh/install/cyrus | sh
+#   curl -fsSL https://github.com/dannyisbad/cyrus/releases/latest/download/install.sh | sh
 #
 # Detects your OS/arch, downloads the matching self-contained `cyrus` binary from
 # the latest GitHub release, drops it in ~/.cyrus/bin, and puts that on your PATH.
