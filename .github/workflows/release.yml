@@ -51,6 +51,20 @@ jobs:
       # inside that directory below.
       - uses: dtolnay/rust-toolchain@stable
 
+      # codex's webrtc-sys (livekit) dep fails its C++ cxx-bridge compile under
+      # the runner's default Xcode 15.4 libc++ (a std::ranges::contiguous_range
+      # static_assert on rust::Slice). Newer libc++ relaxes it — select the
+      # newest Xcode installed on the runner before the build.
+      - name: Use newest Xcode (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -eux
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          test -n "$latest"
+          sudo xcode-select -s "$latest/Contents/Developer"
+          cc --version
+          xcodebuild -version
+
       - name: Read pinned codex fork (scripts/codex.lock)
         id: codex
         run: |
