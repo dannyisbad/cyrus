@@ -3,7 +3,7 @@
 //!
 //!         (+ types.ts: ToolEvent, ApprovalRequest, Capsule, PathLease, MemoryNote)
 //!
-//! Behavioral fidelity notes (vs. the TS original):
+//! Behavioral fidelity notes:
 //!   - The TS serializes ALL state mutations + file I/O through an in-process
 //!     promise queue (the verified save() race fix). Rust has no event loop here,
 //!     so we make every mutator a synchronous `&mut self` method that performs its
@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// Config view (subset of `RepoAgentConfig` from src/types.ts that store.ts reads)
+// Config view
 //
 // `config.rs` is still a skeleton stub (a unit `Config`), and the brief forbids
 // editing it, so — exactly as `http.rs` does with its own `HttpConfig` view —
@@ -60,7 +60,7 @@ pub struct AutoCompactConfig {
     pub return_capsule_every_n_events: usize,
 }
 
-/// Subset of `RepoAgentConfig` (types.ts) that `RepoState` reads. The field names
+/// Subset of `RepoAgentConfig` that `RepoState` reads. The field names
 /// mirror the TS camelCase via serde renames so a real config can round-trip in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoAgentConfig {
@@ -98,7 +98,7 @@ fn default_max_subagent_spawns() -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// Types ported from src/types.ts (the subset store.ts touches).
+// Types ported from src/types.ts.
 // ---------------------------------------------------------------------------
 
 /// `SandboxMode` — "read-only" | "workspace-write" | "danger-full-access".

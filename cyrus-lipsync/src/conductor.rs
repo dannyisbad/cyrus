@@ -392,7 +392,7 @@ pub trait ConductorShim: Send + Sync {
     ) -> anyhow::Result<String>;
     /// `shim.tabs.close_tab(target_id)`.
     async fn close_tab(&self, target_id: &str);
-    /// Build a page surface (chat.py `ChatSurface`) bound to this tab's OWN page
+ /// Build a page surface bound to this tab's OWN page
     /// socket. Equivalent to `CDPClient.for_target(...)` + `ChatSurface(cdp, cfg)` +
     /// `WSTap(cdp, on_ws).start()`. The `on_ws` callback forwards `(kind, value)`
     /// onto the conductor's per-turn WS queue.
@@ -989,7 +989,7 @@ impl ThreadConductor {
             self.thread_id()
         );
         // The SPA new-chat click + composer wait + override re-apply are owned by the
-        // page layer (chat.py held the _NEW_CHAT_JS selector). The conductor expresses
+ // page layer. The conductor expresses
         // it as: stop -> wait_composer -> re-apply overrides; the page surface performs
         // the actual click inside `stop`/`wait_composer` plumbing. We re-assert the
         // overrides after, matching the Python's post-click set_overrides.

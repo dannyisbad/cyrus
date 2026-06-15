@@ -126,7 +126,7 @@ fn git_failure_text(config: &Config, raw: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// _meta builders (renderMeta / appCallableMeta / modelMeta from register.ts).
+// _meta builders.
 // ---------------------------------------------------------------------------
 
 const WORKBENCH_URI: &str = "ui://widget/repo-workbench.html";
@@ -426,7 +426,7 @@ fn relay_target(relay_url: &Option<String>, agent_id: &str) -> Option<RelayTarge
     None
 }
 
-/// A normalized shell-style relay result (matches register.ts's shaped object).
+/// A normalized shell-style relay result.
 struct RelayShellResult {
     exit_code: i32,
     combined: String,

@@ -29,7 +29,7 @@ use url::Url;
 type HmacSha256 = Hmac<Sha256>;
 
 // ---------------------------------------------------------------------------
-// Constants (mirror oauth.ts)
+// Constants
 // ---------------------------------------------------------------------------
 
 const RATE_LIMIT_WINDOW_MS: u128 = 60_000;
@@ -147,7 +147,7 @@ fn decode_std_base64(s: &str) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// JWT (HS256, hand-rolled to byte-match the TS)
+// JWT
 // ---------------------------------------------------------------------------
 
 /// A single JWT claim. We build the payload JSON by hand, in order, so the
@@ -798,7 +798,7 @@ impl OAuth {
         body: &str,
         client_ip: &str,
     ) -> Response {
-        // Rate limit by IP (before the method branch, as in oauth.ts).
+ // Rate limit by IP.
         if !self.check_rate_limit(&format!("auth:{client_ip}")).await {
             return html_response(StatusCode::TOO_MANY_REQUESTS, "<h1>Too many requests</h1>");
         }

@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
-// types (subset of src/types.ts that the tool surface + core ops touch)
+// types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ pub enum ApprovalReviewer {
     AutoReview,
 }
 
-/// `ParsedCommandSummary` (types.ts). `kind` is the classifier output.
+/// `ParsedCommandSummary`. `kind` is the classifier output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedCommandSummary {
     pub kind: String,
@@ -438,7 +438,7 @@ struct ShellSegment {
     words: Vec<String>,
 }
 
-/// Quote-aware lexer (command.ts `lexSegments`).
+/// Quote-aware lexer.
 fn lex_segments(command: &str) -> Vec<ShellSegment> {
     let chars: Vec<char> = command.chars().collect();
     let mut segments: Vec<(String, String)> = Vec::new();
@@ -546,7 +546,7 @@ fn lex_segments(command: &str) -> Vec<ShellSegment> {
         .collect()
 }
 
-/// Quote-aware word split (command.ts `splitWords`).
+/// Quote-aware word split.
 fn split_words(segment: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut cur = String::new();
@@ -956,7 +956,7 @@ fn escape_regex(s: &str) -> String {
     out
 }
 
-/// `globToRegExp` (path.ts). `**` -> `(?:.*)`, `*` -> `[^/]*`, `?` -> `[^/]`.
+/// `globToRegExp`. `**` -> `(?:.*)`, `*` -> `[^/]*`, `?` -> `[^/]`.
 /// The post-join replace lets a `**` segment optionally span `/` boundaries.
 ///
 /// Process-wide memoized: `Regex::new` is ~tens of microseconds, and the hot
@@ -1137,7 +1137,7 @@ fn relative_path(from: &Path, to: &Path) -> String {
     parts.join("/")
 }
 
-/// `resolveInsideRoot` (path.ts) — containment + hidden + blocked-glob +
+/// `resolveInsideRoot` — containment + hidden + blocked-glob +
 /// secret-ish guards. Returns the absolute path or a GuardError.
 pub struct ResolveOpts {
     pub for_write: bool,
@@ -1229,7 +1229,7 @@ fn stat_kind(path: &Path) -> StatKind {
 // ===========================================================================
 
 /// `isInside(parent, candidate)` — true if candidate is inside or equal to
-/// parent (lexical; the TS realpaths first but the comparison logic is this).
+/// parent.
 pub fn is_inside(parent: &Path, candidate: &Path) -> bool {
     let rel = relative_path(parent, candidate);
     rel.is_empty() || (!rel.starts_with("..") && rel != "..")
@@ -1400,7 +1400,7 @@ pub struct ShellResult {
     pub truncated: bool,
 }
 
-/// `commandDenied` (shell.ts) — stealth controls or a deny-regex hit (scanned on
+/// `commandDenied` — stealth controls or a deny-regex hit (scanned on
 /// masked text). Returns the offending pattern/reason.
 pub fn command_denied(config: &Config, command: &str) -> Option<String> {
     if has_stealth_control_chars(command) {
@@ -1417,7 +1417,7 @@ pub fn command_denied(config: &Config, command: &str) -> Option<String> {
     None
 }
 
-/// `filteredEnv` (shell.ts) — only envPassthrough keys plus the REPO_AGENT_* set.
+/// `filteredEnv` — only envPassthrough keys plus the REPO_AGENT_* set.
 pub fn filtered_env(config: &Config) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
     for key in &config.env_passthrough {
@@ -1435,7 +1435,7 @@ pub fn filtered_env(config: &Config) -> Vec<(String, String)> {
     env
 }
 
-/// `validateCwd` (shell.ts) — abs cwd must be inside an allowed root unless
+/// `validateCwd` — abs cwd must be inside an allowed root unless
 /// danger-full-access / bypass. Returns the resolved abs path or an error.
 pub fn validate_cwd(config: &Config, cwd: &str, bypass_policy: bool) -> Result<PathBuf, String> {
     let abs = if Path::new(cwd).exists() {
@@ -1473,7 +1473,7 @@ impl Default for RunShellOpts {
     }
 }
 
-/// `runShell` (shell.ts) — deny-check, cwd-validate, spawn through the platform
+/// `runShell` — deny-check, cwd-validate, spawn through the platform
 /// shell (PowerShell on Windows / `sh -c` elsewhere), collect+truncate output.
 pub async fn run_shell(
     config: &Config,

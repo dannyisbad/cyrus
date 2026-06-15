@@ -1130,7 +1130,7 @@ async fn control_turn_complete(
 
 // ===== entry point ===========================================================
 
-/// Runtime knobs parsed from the CLI (`responses_shim.py`'s argparse) and handed
+/// Runtime knobs parsed from the CLI and handed
 /// to [`serve`]. Mirrors the `ShadowResponsesShim(cfg, model=..., effort=...)`
 /// construction plus the bind host/port and the eager-vs-lazy boot branch.
 #[derive(Debug, Clone, Default)]

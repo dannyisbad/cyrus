@@ -54,7 +54,7 @@ const MCP_PATH: &str = "/mcp";
 // ---------------------------------------------------------------------------
 
 /// Config fields the HTTP layer reads. Mirrors the subset of `RepoAgentConfig`
-/// (types.ts) touched by `runHttp()`. Carried as a plain view so this module
+/// touched by `runHttp()`. Carried as a plain view so this module
 /// compiles against the current placeholder `Config` without depending on its
 /// (not-yet-ported) field layout.
 #[derive(Debug, Clone, Default)]
@@ -158,7 +158,7 @@ impl ToolEventLite {
     }
 }
 
-/// What the OAuth/OIDC routes delegate to (`createOAuthHandlers` in oauth.ts).
+/// What the OAuth/OIDC routes delegate to.
 /// Each method returns a fully-formed HTTP response (the TS handlers write the
 /// status/headers/body themselves); the router just maps the path and the parsed
 /// request to the right one and forwards the response.
@@ -194,7 +194,7 @@ pub struct OAuthRequest {
     pub host: String,
     pub headers: HeaderMap,
     pub body: Vec<u8>,
-    /// Source IP (rate-limit keying in oauth.ts uses the connection peer).
+ /// Source IP.
     pub peer_ip: String,
 }
 
@@ -228,13 +228,13 @@ pub fn current_session() -> Option<String> {
 pub struct AppState {
     pub config: Arc<HttpConfig>,
     pub state: Arc<dyn StateAccess>,
-    /// `Some` only when `publicUrl && bearerToken` (mirrors the TS `oauth` guard).
+ /// `Some` only when `publicUrl && bearerToken`.
     pub oauth: Option<Arc<dyn OAuthProvider>>,
     pub mcp: Arc<dyn McpDispatch>,
 }
 
 // ---------------------------------------------------------------------------
-// Header / auth / tunnel helpers (1:1 with the TS free functions).
+// Header / auth / tunnel helpers.
 // ---------------------------------------------------------------------------
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

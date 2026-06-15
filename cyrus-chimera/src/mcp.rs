@@ -62,7 +62,7 @@ fn empty_object_schema() -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Per-request session context — replaces AsyncLocalStorage (core/context.ts)
+// Per-request session context — replaces AsyncLocalStorage
 // ---------------------------------------------------------------------------
 
 tokio::task_local! {
