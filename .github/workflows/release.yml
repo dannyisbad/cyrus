@@ -65,6 +65,16 @@ jobs:
           echo "codex fork: $url @ $sha"
 
       - name: Build pinned codex fork
+        # The codex workspace is huge; its release profile (thin LTO +
+        # line-tables debug, default parallelism) peaks past the runner's RAM
+        # and the agent gets SIGKILLed (exit 143). Cap concurrency and strip the
+        # memory/disk-heavy bits — codex runs as a subprocess, so dropping LTO /
+        # debuginfo costs nothing we care about and makes the embedded bin smaller.
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_DEBUG: "false"
+          CARGO_PROFILE_RELEASE_STRIP: "true"
         run: |
           set -eux
           git clone --no-checkout "${{ steps.codex.outputs.url }}" "$RUNNER_TEMP/codex"
@@ -89,6 +99,11 @@ jobs:
           esac
 
       - name: Build cyrus (single binary, embedding codex + cloudflared)
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_DEBUG: "false"
+          CARGO_PROFILE_RELEASE_STRIP: "true"
         run: |
           set -eux
           if [ "${{ runner.os }}" = "Windows" ]; then
