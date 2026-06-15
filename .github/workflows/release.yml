@@ -54,8 +54,11 @@ jobs:
       - name: Read pinned codex fork (scripts/codex.lock)
         id: codex
         run: |
-          url=$(grep -E '^\s*url\s*=' scripts/codex.lock | sed -E 's/^[^=]*=\s*//')
-          sha=$(grep -E '^\s*sha\s*=' scripts/codex.lock | sed -E 's/^[^=]*=\s*//')
+          # POSIX [[:space:]], not \s: BSD sed on the macOS runners doesn't grok
+          # \s, so it left a leading space in the value (url=" https://...") and
+          # broke `git clone`. tr strips any stray whitespace / CR (CRLF lock file).
+          url=$(sed -nE 's/^[[:space:]]*url[[:space:]]*=[[:space:]]*//p' scripts/codex.lock | tr -d '[:space:]')
+          sha=$(sed -nE 's/^[[:space:]]*sha[[:space:]]*=[[:space:]]*//p' scripts/codex.lock | tr -d '[:space:]')
           [ -n "$url" ] && [ -n "$sha" ] || { echo "codex.lock missing url/sha"; exit 1; }
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
