@@ -1044,6 +1044,14 @@ mod tests {
         on_ws: std::sync::Mutex<Option<WsCallback>>,
         /// Every text injected into the mock chat, in order.
         injects: Arc<std::sync::Mutex<Vec<String>>>,
+        /// Every `set_overrides` call against the mock chat, in order — so tests
+        /// can assert which model/effort the conductor pinned each turn.
+        overrides: Arc<std::sync::Mutex<Vec<ChatOverrides>>>,
+        /// The `generating` flag MockChat.state() reports. Defaults to TRUE (a
+        /// turn in progress) so the stall watchdog's "is it still generating?"
+        /// poll exercises the abort path; a test flips it false to simulate
+        /// ChatGPT finishing without the tap forwarding a completion.
+        generating: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl MockShim {
@@ -1057,6 +1065,8 @@ mod tests {
                 tail_agent: std::sync::Mutex::new(None),
                 on_ws: std::sync::Mutex::new(None),
                 injects: Arc::new(std::sync::Mutex::new(Vec::new())),
+                overrides: Arc::new(std::sync::Mutex::new(Vec::new())),
+                generating: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             })
         }
 
@@ -1071,6 +1081,15 @@ mod tests {
 
         fn injected(&self) -> Vec<String> {
             self.injects.lock().unwrap().clone()
+        }
+
+        fn overrides(&self) -> Vec<ChatOverrides> {
+            self.overrides.lock().unwrap().clone()
+        }
+
+        /// Simulate ChatGPT finishing (or still generating) for the stall poll.
+        fn set_generating(&self, on: bool) {
+            self.generating.store(on, Ordering::SeqCst);
         }
     }
 
@@ -1112,6 +1131,8 @@ mod tests {
             *self.on_ws.lock().unwrap() = Some(on_ws);
             Ok(Arc::new(MockChat {
                 injects: Arc::clone(&self.injects),
+                overrides: Arc::clone(&self.overrides),
+                generating: Arc::clone(&self.generating),
             }))
         }
         async fn seed_binds_once(&self) -> anyhow::Result<()> {
@@ -1153,6 +1174,8 @@ mod tests {
 
     struct MockChat {
         injects: Arc<std::sync::Mutex<Vec<String>>>,
+        overrides: Arc<std::sync::Mutex<Vec<ChatOverrides>>>,
+        generating: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[async_trait]
@@ -1162,7 +1185,8 @@ mod tests {
             Ok(())
         }
         async fn state(&self) -> anyhow::Result<Value> {
-            Ok(json!({"generating": false, "composerReady": true, "hasApprove": false}))
+            let generating = self.generating.load(Ordering::SeqCst);
+            Ok(json!({"generating": generating, "composerReady": !generating, "hasApprove": false}))
         }
         async fn approve(&self) -> anyhow::Result<()> {
             Ok(())
@@ -1170,10 +1194,14 @@ mod tests {
         async fn stop(&self) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn resolve_slug(&self, _model: &str) -> anyhow::Result<Option<String>> {
-            Ok(None)
+        async fn resolve_slug(&self, model: &str) -> anyhow::Result<Option<String>> {
+            // Echo the spec back so boot pins a concrete model (matches the real
+            // adapter closely enough for assertions; the conductor passes the raw
+            // codex spec to set_overrides regardless).
+            Ok(Some(model.to_string()))
         }
-        async fn set_overrides(&self, _ov: ChatOverrides) -> anyhow::Result<()> {
+        async fn set_overrides(&self, ov: ChatOverrides) -> anyhow::Result<()> {
+            self.overrides.lock().unwrap().push(ov);
             Ok(())
         }
         async fn current_conversation_id(&self) -> anyhow::Result<Option<String>> {
@@ -1293,6 +1321,42 @@ mod tests {
         assert!(
             msg.contains("no output") && msg.contains("connector-tool"),
             "stall error should name both silent channels: {msg}"
+        );
+    }
+
+    /// End-of-turn regression: a long tool-heavy turn hands its stream off to the
+    /// shared-worker socket, so the final answer + completion arrive INVISIBLE to
+    /// the CDP tap — the turn is DONE but no turn_complete is ever forwarded.
+    /// The watchdog must notice ChatGPT stopped GENERATING and close the turn
+    /// CLEANLY (Ok), not burn the budget and abort (which forced codex into a
+    /// stall-retry loop after the work was already done).
+    #[tokio::test]
+    async fn missed_completion_closes_cleanly_when_generation_stops() {
+        let _env = STALL_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SHIM_TURN_STALL_SECS", "1"); // poll = min(15s, 1s) = 1s
+        let shim = MockShim::new();
+        let mux = mux_with(shim.clone());
+        let c = mux.get_conductor(Some("missed"), None).await;
+        c.boot().await.expect("mock boot");
+        let (tx, _rx) = mpsc::channel::<String>(256);
+        let body = json!({"input": "hi", "tools": []});
+        let c1 = c.clone();
+        let b1 = body.clone();
+        let turn = tokio::spawn(async move { c1.run_turn_conductor(&tx, &b1).await });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Some visible text streamed, then ChatGPT finishes — but the tap never
+        // forwards turn_complete (the handoff). Generation halts.
+        let ws = shim.ws();
+        ws("token", "partial visible answer");
+        shim.set_generating(false);
+        let outcome = timeout(std::time::Duration::from_secs(8), turn).await;
+        std::env::remove_var("SHIM_TURN_STALL_SECS");
+        let res = outcome
+            .expect("turn must close within 8s, not hang")
+            .expect("join");
+        assert!(
+            res.is_ok(),
+            "a finished turn whose completion the tap missed must close CLEANLY, got: {res:?}"
         );
     }
 
@@ -1490,6 +1554,78 @@ survive past the stall budget, got: {outcome:?}"
             .expect("typed TurnFailed");
         assert_eq!(tf2.code, "shim_error");
         assert!(tf2.message.contains("try again in 30 seconds"));
+    }
+
+    /// Regression: codex's per-request `body.model` (the live picker choice) must
+    /// win over the launch default — INCLUDING the first turn, and again when the
+    /// picker switches mid-session. Boot pins the launch model; the conductor must
+    /// re-pin from the body before each inject. This is the "selected model
+    /// doesn't apply / first turn applies no model" bug.
+    #[tokio::test]
+    async fn body_model_overrides_launch_model_each_turn() {
+        let shim = MockShim::new();
+        // launch default = gpt-5-5-thinking, effort extended (mux_with).
+        let mux = mux_with(shim.clone());
+        let c = mux.get_conductor(Some("model"), None).await;
+        c.boot().await.expect("mock boot");
+        let ws = shim.ws();
+
+        let last_model = |s: &MockShim| -> Option<String> {
+            s.overrides().iter().rev().find_map(|o| o.model.clone())
+        };
+
+        // Turn 1: the picker is on gpt-5-5-pro, even though boot pinned thinking.
+        let body_pro = json!({
+            "model": "gpt-5-5-pro",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "tools": [],
+            "reasoning": {"effort": "high"},
+        });
+        let (tx, _rx) = mpsc::channel::<String>(256);
+        let c1 = c.clone();
+        let b1 = body_pro.clone();
+        let t = tokio::spawn(async move { c1.run_turn_conductor(&tx, &b1).await });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        ws("token", "ok");
+        ws("turn_complete", "ok");
+        t.await.unwrap().expect("turn 1 ok");
+        assert_eq!(
+            last_model(&shim).as_deref(),
+            Some("gpt-5-5-pro"),
+            "turn 1 must pin the body model, not the launch default: {:?}",
+            shim.overrides()
+        );
+        // effort high -> extended
+        assert_eq!(
+            shim.overrides()
+                .iter()
+                .rev()
+                .find_map(|o| o.thinking_effort.clone())
+                .as_deref(),
+            Some("extended")
+        );
+
+        // Turn 2: the picker switches back to thinking — must re-pin, not stick.
+        let body_thinking = json!({
+            "model": "gpt-5-5-thinking",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "again"}]}],
+            "tools": [],
+            "reasoning": {"effort": "high"},
+        });
+        let (tx2, _rx2) = mpsc::channel::<String>(256);
+        let c2 = c.clone();
+        let b2 = body_thinking.clone();
+        let t2 = tokio::spawn(async move { c2.run_turn_conductor(&tx2, &b2).await });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        ws("token", "ok");
+        ws("turn_complete", "ok");
+        t2.await.unwrap().expect("turn 2 ok");
+        assert_eq!(
+            last_model(&shim).as_deref(),
+            Some("gpt-5-5-thinking"),
+            "turn 2 must re-pin the new body model: {:?}",
+            shim.overrides()
+        );
     }
 
     /// L5: a restarted bridge gets the prior conversation replayed into the

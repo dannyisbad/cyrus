@@ -662,10 +662,11 @@ fn render_success(json: bool, opts: &SetupOptions, out: &SetupOutcome) {
         "connector",
         &format!("{} · {} tools", opts.connector_name, out.tool_count),
     );
-    detail_row("config", "model_providers.shadow");
     println!();
     println!(
-        "Select the \"shadow\" model provider in codex to use it. Run `cyrus check` to verify."
+        "Just run `cyrus` (or `cyrus exec \"…\"`) to code on your ChatGPT plan — the\n\
+         provider is selected for you, and nothing is written to your codex config.\n\
+         `cyrus check` re-verifies the setup anytime."
     );
 }
 
@@ -685,6 +686,9 @@ fn render_failure(json: bool, opts: &SetupOptions, failed: Option<Step>, e: &any
         let mut obj = serde_json::json!({"event": "error", "message": format!("{e:#}")});
         if let Some(step) = failed {
             obj["step"] = serde_json::Value::String(step_key(step).to_string());
+            // Carry the actionable remedy so a TUI front-end can show the same
+            // help the headless failure block does (not just the raw error).
+            obj["remedy"] = serde_json::Value::String(step.remedy().to_string());
         }
         emit_json(obj);
         return;

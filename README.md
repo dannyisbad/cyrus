@@ -66,24 +66,49 @@ directly during development — nothing in the product depends on them.
 
 ## Quick start
 
-Requirements: Rust (stable), Google Chrome, a ChatGPT Plus/Pro account, and
-[ngrok](https://ngrok.com) or
-[cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
-for the tunnel. Windows is the validated platform; macOS/Linux should work but
-are less tested.
+Install (one self-contained binary — codex and cloudflared are embedded, nothing
+else to fetch):
+
+```sh
+# macOS / Linux
+curl -fsSL https://mundy.sh/install/cyrus | sh
+```
+```powershell
+# Windows (PowerShell)
+irm https://mundy.sh/install/cyrus.ps1 | iex
+```
+
+Then connect your ChatGPT session once and go:
+
+```sh
+cyrus setup       # one-time: opens Chrome, you log in to ChatGPT
+cyrus             # codex on the plan you already pay for
+cyrus exec "fix the failing test"
+```
+
+You'll also need Google Chrome and a ChatGPT Plus/Pro account. Windows is the
+most-tested platform; macOS and Linux builds are published too.
+
+<details><summary>Build from source instead</summary>
+
+Requirements: Rust (stable). The release binary embeds the pinned codex fork +
+cloudflared; a plain `cargo build` does not (it resolves them from PATH).
 
 ```sh
 cargo build --release --workspace
-
-# the single self-contained binary is all you need to run or ship
 target/release/cyrus setup --repo /path/to/your/repo
 ```
 
+For the embedded single-binary (what the installer ships), see
+`scripts/release.ps1` (Windows) or `.github/workflows/release.yml` (all platforms).
+</details>
+
 `cyrus setup` walks six idempotent steps and tells you the one thing it needs
 from you (a ChatGPT login in the Chrome window it opens). Re-running it is
-always safe: healthy layers are reused, broken ones repaired. It finishes by
-writing a `shadow` model provider into `~/.codex/config.toml`, after which
-codex can run turns through your ChatGPT session.
+always safe: healthy layers are reused, broken ones repaired. It writes
+**nothing** to your codex config — the `cyrus` front door injects the model
+provider as per-launch overrides, so a plain `codex` stays pristine. After it
+finishes, run `cyrus` and your turns go through your ChatGPT session.
 
 ### `cyrus` is a front door to `codex`
 
@@ -102,10 +127,9 @@ cyrus resume --last          # → codex … (any codex command/flags work)
 ```
 
 A one-line breadcrumb on stderr (`cyrus › codex …`) makes the handoff obvious.
-Point cyrus at a different codex binary with `CYRUS_CODEX_BIN`. (Prefer the
-plain `codex` command instead? The `shadow` provider is in your codex config —
-select it with `codex -c model_provider=shadow`, or set `model_provider =
-"shadow"` as your codex default.)
+Point cyrus at a different codex binary with `CYRUS_CODEX_BIN`. (cyrus injects
+the model provider as per-launch `-c` overrides — nothing is written to your
+codex config, and a plain `codex` keeps running on its normal provider.)
 
 For a stable tunnel URL (strongly recommended — it means the ChatGPT connector
 is created once, ever), set up a free ngrok static domain:

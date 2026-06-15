@@ -239,17 +239,15 @@ macro_rules! handler {
 // Snapshot / event helpers shared across handlers.
 // ---------------------------------------------------------------------------
 
-/// `withCompaction(state, reply, reason)` — run `maybeCompact` and stamp the
-/// returned notice onto the reply's structuredContent.compaction.
-fn with_compaction(state: &mut RepoState, mut reply: ToolReply, reason: &str) -> ToolReply {
-    if let Some(notice) = state.maybe_compact(reason) {
-        if let Value::Object(map) = &mut reply.structured_content {
-            map.insert(
-                "compaction".to_string(),
-                serde_json::to_value(&notice).unwrap_or(Value::Null),
-            );
-        }
-    }
+/// `withCompaction(state, reply, reason)` — create the durability capsule when the
+/// event soft-limit trips, but do NOT stamp a "call repo_resume" directive onto the
+/// model-visible reply. Nagging the model to resume mid-task ("Call
+/// repo_resume({mode:'groove'}) before continuing") derailed it into a connector/
+/// tool loop instead of finishing the task; the capsule stays reachable via the
+/// explicit repo_resume tool. Dropping the notice here (rather than relying on lean
+/// mode to strip it) also covers widget tools and the CHIMERA_LEAN_RESULTS=0 path.
+fn with_compaction(state: &mut RepoState, reply: ToolReply, reason: &str) -> ToolReply {
+    let _ = state.maybe_compact(reason);
     reply
 }
 

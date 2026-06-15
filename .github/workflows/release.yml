@@ -1,0 +1,151 @@
+name: release
+
+# Builds the single self-contained `cyrus` binary for every platform and attaches
+# them to a GitHub Release. Each runner builds NATIVELY for its own OS/arch (cross
+# -compiling this stack needs the target's C toolchain — ring, etc. — so native
+# runners are the reliable path). Per target, in order: build the pinned codex
+# fork, fetch cloudflared, then build cyrus with both embedded.
+#
+# Trigger: push a tag like `v0.1.0`, or run manually (workflow_dispatch) to dry-run
+# the build artifacts without publishing a release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the release + upload assets
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            cf: cloudflared-linux-amd64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            cf: cloudflared-linux-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            cf: cloudflared-darwin-amd64.tgz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            cf: cloudflared-darwin-arm64.tgz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            cf: cloudflared-windows-amd64.exe
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # Default toolchain for the cyrus build. The codex fork pins its own rustc
+      # via codex-rs/rust-toolchain.toml, which rustup auto-installs when we build
+      # inside that directory below.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read pinned codex fork (scripts/codex.lock)
+        id: codex
+        run: |
+          url=$(grep -E '^\s*url\s*=' scripts/codex.lock | sed -E 's/^[^=]*=\s*//')
+          sha=$(grep -E '^\s*sha\s*=' scripts/codex.lock | sed -E 's/^[^=]*=\s*//')
+          [ -n "$url" ] && [ -n "$sha" ] || { echo "codex.lock missing url/sha"; exit 1; }
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "codex fork: $url @ $sha"
+
+      - name: Build pinned codex fork
+        run: |
+          set -eux
+          git clone --no-checkout "${{ steps.codex.outputs.url }}" "$RUNNER_TEMP/codex"
+          git -C "$RUNNER_TEMP/codex" -c advice.detachedHead=false checkout "${{ steps.codex.outputs.sha }}"
+          # Build from inside codex-rs so its rust-toolchain.toml is honored.
+          ( cd "$RUNNER_TEMP/codex/codex-rs" && cargo build --release --bin codex )
+
+      - name: Fetch cloudflared (embedded)
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/cf"
+          url="https://github.com/cloudflare/cloudflared/releases/latest/download/${{ matrix.cf }}"
+          case "${{ matrix.cf }}" in
+            *.tgz)  curl -fsSL "$url" -o "$RUNNER_TEMP/cf/cf.tgz"
+                    tar -xzf "$RUNNER_TEMP/cf/cf.tgz" -C "$RUNNER_TEMP/cf"
+                    echo "CF_BIN=$RUNNER_TEMP/cf/cloudflared" >> "$GITHUB_ENV" ;;
+            *.exe)  curl -fsSL "$url" -o "$RUNNER_TEMP/cf/cloudflared.exe"
+                    echo "CF_BIN=$RUNNER_TEMP/cf/cloudflared.exe" >> "$GITHUB_ENV" ;;
+            *)      curl -fsSL "$url" -o "$RUNNER_TEMP/cf/cloudflared"
+                    chmod +x "$RUNNER_TEMP/cf/cloudflared"
+                    echo "CF_BIN=$RUNNER_TEMP/cf/cloudflared" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Build cyrus (single binary, embedding codex + cloudflared)
+        run: |
+          set -eux
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            CODEX_BIN="$RUNNER_TEMP/codex/codex-rs/target/release/codex.exe"
+          else
+            CODEX_BIN="$RUNNER_TEMP/codex/codex-rs/target/release/codex"
+          fi
+          test -f "$CODEX_BIN"
+          CYRUS_EMBED_CODEX="$CODEX_BIN" \
+          CYRUS_EMBED_CLOUDFLARED="$CF_BIN" \
+          CYRUS_EMBED_ZSTD_LEVEL=19 \
+            cargo build --release -p cyrus-setup --bin cyrus
+
+      - name: Package
+        id: pkg
+        run: |
+          set -eux
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/cyrus.exe dist/cyrus.exe
+            asset="cyrus-${{ matrix.target }}.zip"
+            ( cd dist && 7z a "$asset" cyrus.exe >/dev/null )
+          else
+            cp target/release/cyrus dist/cyrus
+            asset="cyrus-${{ matrix.target }}.tar.gz"
+            ( cd dist && tar -czf "$asset" cyrus )
+          fi
+          ( cd dist && shasum -a 256 "$asset" > "$asset.sha256" 2>/dev/null || sha256sum "$asset" > "$asset.sha256" )
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cyrus-${{ matrix.target }}
+          path: |
+            dist/${{ steps.pkg.outputs.asset }}
+            dist/${{ steps.pkg.outputs.asset }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Collect checksums
+        run: |
+          set -eux
+          cd artifacts
+          cat *.sha256 > SHA256SUMS
+          ls -la
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/cyrus-*.tar.gz
+            artifacts/cyrus-*.zip
+            artifacts/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true

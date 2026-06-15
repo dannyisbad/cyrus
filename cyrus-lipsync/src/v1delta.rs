@@ -450,18 +450,31 @@ impl V1DeltaParser {
 /// Heuristic error detection over a typed event the parser doesn't otherwise
 /// recognize. Returns `Some((code, message))` when the event looks like a
 /// server-side error:
-///   - its `type` contains "error" / "moderation" / "rate_limit" (deliberately
-///     NOT bare "rate", which substring-matches benign words like "generated"),
+///   - its `type` contains "error" / "rate_limit" (deliberately NOT bare
+///     "rate", which substring-matches benign words like "generated"),
 ///   - OR the payload carries a top-level `error` object,
 ///   - OR the payload carries BOTH top-level `code` and `message` fields.
+///
+/// "moderation" is deliberately NOT a type-name trigger. ChatGPT streams benign
+/// moderation/safety ANNOTATION events (`url_moderation`, URL-safety tagging) on
+/// perfectly healthy turns — the answer streams fine right after — so flagging
+/// the bare word produced false "ChatGPT refused the turn (moderation)" fatals
+/// on turns that were never refused. A genuine content block still surfaces: it
+/// carries an explicit `error` object / `code`+`message` (caught below), or it
+/// arrives as a normal safe-completion message (handled as answer text).
+///
 /// Conservative by design: anything that doesn't match stays on the current
 /// behavior (logged + dropped; the stall watchdog remains the backstop).
 fn error_fields(etype: &str, obj: &Value) -> Option<(String, String)> {
     let t = etype.to_ascii_lowercase();
-    let typed_error = t.contains("error")
-        || t.contains("moderation")
-        || t.contains("rate_limit")
-        || t.contains("rate-limit");
+    // Known benign moderation/safety annotations: never an error, even if a
+    // future variant grows a code/message field.
+    const BENIGN: [&str; 3] = ["url_moderation", "url_safe", "safe_url"];
+    if BENIGN.iter().any(|b| t.contains(b)) {
+        return None;
+    }
+    let typed_error =
+        t.contains("error") || t.contains("rate_limit") || t.contains("rate-limit");
     let err_obj = obj.get("error").filter(|e| !e.is_null());
     let has_code_msg = obj.get("code").is_some() && obj.get("message").is_some();
     if !(typed_error || err_obj.is_some() || has_code_msg) {
@@ -624,6 +637,24 @@ mod tests {
             ev.as_slice(),
             [Event::StreamError { code, .. }] if code == "moderation_blocked"
         ));
+    }
+
+    #[test]
+    fn benign_url_moderation_is_not_an_error() {
+        let mut p = V1DeltaParser::default();
+        // ChatGPT's URL-safety annotation: contains "moderation" but never blocks.
+        // It must NOT surface as a fatal StreamError (the "it just lied" regression).
+        assert!(p
+            .feed(r#"{"type":"url_moderation","url_moderation_result":{"full_url":"x"}}"#)
+            .is_empty());
+        // even if a future variant grows code+message, the type stays benign.
+        assert!(p
+            .feed(r#"{"type":"url_moderation","code":"safe","message":"ok"}"#)
+            .is_empty());
+        // a real answer still streams fine afterward.
+        p.feed(r#"{"v":{"message":{"id":"m1","author":{"role":"assistant"},"content":{"parts":[""]}}}}"#);
+        let ev = p.feed(r#"{"p":"/message/content/parts/0","o":"append","v":"hi"}"#);
+        assert_eq!(tokens(&ev), "hi");
     }
 
     #[test]

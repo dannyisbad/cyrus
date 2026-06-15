@@ -829,12 +829,20 @@ pub fn build_app(shim: ShadowResponsesShim) -> Router {
         .with_state(Arc::new(shim))
 }
 
-/// `GET/POST /v1/models` (and `/models`) — a minimal OpenAI models-list stub.
+/// `GET/POST /v1/models` (and `/models`) — a minimal models-list stub serving
+/// BOTH shapes codex pokes at this endpoint with:
 ///
-/// codex's startup/doctor route-probe only inspects the HTTP status (it accepts
-/// 2xx/401/403 and ignores the body), so a 200 with a well-formed list is all
-/// that's needed. We still return a valid OpenAI-shaped payload listing the
-/// shim's configured model so any stricter future consumer parses cleanly.
+///   - the OpenAI route-probe (`object`/`data`) — the doctor only checks the
+///     HTTP status, but we keep a well-formed list for any stricter consumer;
+///   - codex's models-manager, which decodes the body as `ModelsResponse`
+///     (`{"models":[...]}`). We return an EMPTY `models` list on purpose: the
+///     shim is not a real model catalog, and an empty remote makes the manager
+///     KEEP its bundled catalog (the curated cyrus lanes incl. GPT-5.5 Pro)
+///     instead of replacing it. The previous OpenAI-only body had no `models`
+///     key, so the manager's decode FAILED every refresh — logging an error and
+///     making the picker's contents depend on fetch/cache timing (the flaky
+///     "GPT-5.5 Pro disappears" symptom). An empty-but-valid `models` resolves
+///     cleanly and deterministically to the bundled catalog.
 ///
 /// Must be 200 and valid JSON, and MUST NOT be 401 (401 trips codex's
 /// auth-refresh machinery — same constraint the other stubs honor).
@@ -851,6 +859,8 @@ async fn models_list(State(shim): State<Arc<ShadowResponsesShim>>) -> Response {
                     "owned_by": "cyrus",
                 }
             ],
+            // codex models-manager shape: empty -> keep the bundled catalog.
+            "models": [],
         })),
     )
         .into_response()

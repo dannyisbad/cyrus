@@ -1549,18 +1549,34 @@ async fn wait_child_with_timeout(
     }
 }
 
-/// Best-effort process-tree kill by pid (Windows: `taskkill /T /F`, mirroring
-/// [`bg_kill_tree`]). On non-Windows the caller's `kill_on_drop` already
-/// SIGKILLs the direct child; descendants are not tracked there (same gap the
-/// bg registry has).
+/// SIGKILL the whole process group led by `pid`. Children are spawned as their
+/// own group leader (`process_group(0)`, see [`platform_shell`]), so `pgid == pid`
+/// and a negative pid signals the entire subtree — the `sh`, the `cargo` it ran,
+/// and every `rustc` that forked from it. Without this, a timed-out build leaves
+/// orphaned compilers running on macOS/Linux.
+#[cfg(unix)]
+fn unix_kill_group(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", &format!("-{pid}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Best-effort process-tree kill by pid. Windows: `taskkill /T /F`. Unix: SIGKILL
+/// the child's process group (see [`unix_kill_group`]) — `kill_on_drop` alone only
+/// reaps the direct child and would orphan its descendants.
 fn kill_pid_tree(pid: u32) {
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
     }
+    #[cfg(unix)]
+    unix_kill_group(pid);
 }
 
 /// Shape a collected `Output` into the [`ShellResult`] contract (combined text,
@@ -1644,6 +1660,10 @@ fn platform_shell(command: &str) -> tokio::process::Command {
     } else {
         let mut c = tokio::process::Command::new("sh");
         c.arg("-c").arg(command);
+        // Lead a fresh process group so a timeout can SIGKILL the whole subtree
+        // (sh -> cargo -> rustc ...), not just the direct child. See kill_pid_tree.
+        #[cfg(unix)]
+        c.process_group(0);
         c
     }
 }
@@ -1658,6 +1678,12 @@ fn platform_shell_std(command: &str) -> std::process::Command {
     } else {
         let mut c = std::process::Command::new("sh");
         c.arg("-c").arg(command);
+        // Own process group so repo_bg_stop can kill the whole subtree.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            c.process_group(0);
+        }
         c
     }
 }
@@ -1943,14 +1969,19 @@ fn bg_kill_tree(proc: &BgProc) {
         Some(p) => p,
         None => return,
     };
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
-    } else {
-        // Best-effort: kill the child directly (the std child has no group handle).
+    }
+    #[cfg(unix)]
+    {
+        // Kill the whole process group (the child leads its own; see
+        // platform_shell_std), then the direct child as a backstop.
+        unix_kill_group(pid);
         let _ = proc.child.lock().unwrap().kill();
     }
 }

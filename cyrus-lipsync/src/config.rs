@@ -40,10 +40,6 @@ pub struct ShadowConfig {
     pub poll_interval: f64,
     /// consecutive stable polls before a turn counts as complete
     pub stable_ticks: u32,
-    /// safety cap on auto-continues within one task
-    pub max_turns: u32,
-    /// wall-clock safety cap per task (minutes)
-    pub max_minutes: u32,
     pub continue_text: String,
     /// auto-click write-confirmation cards
     pub auto_approve: bool,
@@ -93,8 +89,6 @@ pub struct ShadowConfig {
     pub server_bearer: Option<String>,
     /// concurrent live subagent tabs (2-3 is a practical ceiling)
     pub max_subagents: u32,
-    pub subagent_max_turns: u32,
-    pub subagent_max_minutes: u32,
     /// seconds of no tokens + not generating -> stalled
     pub subagent_idle_timeout: f64,
     /// seconds between /control/subagents polls
@@ -174,8 +168,6 @@ impl Default for ShadowConfig {
 
             poll_interval: 1.2,
             stable_ticks: 3,
-            max_turns: 50,
-            max_minutes: 30,
             continue_text: "continue".to_string(),
             auto_approve: true,
 
@@ -183,7 +175,13 @@ impl Default for ShadowConfig {
             continue_variants: CONTINUE_VARIANTS.iter().map(|s| s.to_string()).collect(),
 
             max_block_recoveries: 4,
-            loop_repeat_threshold: 2,
+            // Hard-stop only after this many IDENTICAL repeats of the same call.
+            // 2 was too tight for build workflows (a model that re-runs `cargo
+            // build` to confirm a fix tripped it instantly); 4 leaves room for
+            // legitimate re-runs while still catching a genuine stuck loop. Edits
+            // reset the counter (see control_toolcall's mutation clear), and
+            // update_plan is exempt entirely.
+            loop_repeat_threshold: 4,
 
             model_slug: None,
             thinking_effort: None,
@@ -192,8 +190,6 @@ impl Default for ShadowConfig {
 
             server_bearer: None,
             max_subagents: 2,
-            subagent_max_turns: 30,
-            subagent_max_minutes: 12,
             subagent_idle_timeout: 90.0,
             spawn_poll_interval: 1.5,
             subagent_preamble: SUBAGENT_PREAMBLE.to_string(),
@@ -231,8 +227,6 @@ impl ShadowConfig {
 
             poll_interval: parse_or(env::var("POLL_INTERVAL").ok().as_deref(), 1.2),
             stable_ticks: parse_or(env::var("STABLE_TICKS").ok().as_deref(), 3),
-            max_turns: parse_or(env::var("MAX_TURNS").ok().as_deref(), 50),
-            max_minutes: parse_or(env::var("MAX_MINUTES").ok().as_deref(), 30),
             continue_text: env::var("CONTINUE_TEXT").unwrap_or_else(|_| "continue".to_string()),
             auto_approve: env::var("AUTO_APPROVE").as_deref().unwrap_or("1") != "0",
 
@@ -280,8 +274,6 @@ mod tests {
         assert_eq!(c.server_url, "http://127.0.0.1:8787");
         assert_eq!(c.poll_interval, 1.2);
         assert_eq!(c.stable_ticks, 3);
-        assert_eq!(c.max_turns, 50);
-        assert_eq!(c.max_minutes, 30);
         assert_eq!(c.continue_text, "continue");
         assert!(c.auto_approve);
         assert!(c.human_jitter);
@@ -297,15 +289,13 @@ mod tests {
             ]
         );
         assert_eq!(c.max_block_recoveries, 4);
-        assert_eq!(c.loop_repeat_threshold, 2);
+        assert_eq!(c.loop_repeat_threshold, 4);
         assert_eq!(c.model_slug, None);
         assert_eq!(c.thinking_effort, None);
         assert_eq!(c.subagent_model_slug, None);
         assert_eq!(c.subagent_thinking_effort, None);
         assert_eq!(c.server_bearer, None);
         assert_eq!(c.max_subagents, 2);
-        assert_eq!(c.subagent_max_turns, 30);
-        assert_eq!(c.subagent_max_minutes, 12);
         assert_eq!(c.subagent_idle_timeout, 90.0);
         assert_eq!(c.spawn_poll_interval, 1.5);
         assert!(c.send_preamble);

@@ -436,6 +436,26 @@ pub(crate) const DEFAULT_ENV_PASSTHROUGH: &[&str] = &[
     "npm_config_user_agent",
     "PNPM_HOME",
     "COREPACK_HOME",
+    // Windows-critical: the shell tools spawn `powershell.exe` under env_clear(),
+    // and PowerShell's managed (.NET/CryptoAPI) host fails to load WITHOUT these —
+    // it exits with code -65536 and "Loading managed Windows PowerShell failed with
+    // error 8009001d" (NTE_PROVIDER_DLL_FAIL: the crypto provider DLL can't init
+    // because it can't locate its DLLs/keys). SystemRoot is the load-bearing one;
+    // the rest keep cargo/rustc/link.exe and cmd-wrapped commands working. These
+    // are absent on non-Windows, where filtered_env just skips the missing keys.
+    "SystemRoot",
+    "windir",
+    "SystemDrive",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "PATHEXT",
+    "TMP",
+    "ComSpec",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
 ];
 
 /// Production default command profiles. `pub(crate)`: see DEFAULT_BLOCKED_PATH_GLOBS.

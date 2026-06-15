@@ -84,7 +84,7 @@ impl Step {
             Step::Tunnel => "a public HTTPS URL so ChatGPT's connector can reach you",
             Step::Stack => "chimera (the connector server) + lipsync (the model bridge)",
             Step::Connector => "registers the MCP connector on your ChatGPT account",
-            Step::CodexConfig => "writes the `shadow` model provider into your codex config",
+            Step::CodexConfig => "points codex at cyrus — injected at launch, nothing written to your config",
         }
     }
 
@@ -374,7 +374,11 @@ pub async fn diagnose(opts: &SetupOptions) -> Diagnosis {
     match connector::recorded_connector(opts) {
         Some(rec) => {
             let public = rec.mcp_url.trim_end_matches("/mcp");
-            let reaches = tunnel::verify_through_tunnel(public).await.is_ok();
+            // `cyrus check` is a READ-ONLY doctor: use the single-shot probe
+            // (≤6s), never `verify_through_tunnel`'s 180s setup retry loop — a
+            // doctor must answer fast precisely when things are down, which is
+            // exactly when that loop would otherwise hang for 3 minutes.
+            let reaches = tunnel::tunnel_alive(public).await;
             components.push(ComponentHealth {
                 name: "Tunnel".to_string(),
                 ok: reaches,

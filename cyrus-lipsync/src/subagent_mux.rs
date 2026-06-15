@@ -457,7 +457,6 @@ pub struct SubProvider {
     chat: AsyncMutex<Option<ChatSurface>>,
     tap: AsyncMutex<Option<WsTap>>,
     files: Mutex<HashSet<String>>,
-    turns: AtomicU64,
     /// "spawning" | "running" | terminal status; read by the mux's `_live`.
     status: Mutex<String>,
 }
@@ -490,7 +489,6 @@ impl SubProvider {
             chat: AsyncMutex::new(None),
             tap: AsyncMutex::new(None),
             files: Mutex::new(HashSet::new()),
-            turns: AtomicU64::new(0),
             status: Mutex::new("spawning".to_string()),
         }
     }
@@ -678,7 +676,6 @@ impl SubProvider {
         // form (serde_json::Value isn't Hash). The same id always renders to the same
         // string, so the dedup semantics are identical.
         let mut seen: HashSet<String> = HashSet::new();
-        let deadline = Instant::now() + Duration::from_secs(cfg.subagent_max_minutes as u64 * 60);
         let idle_timeout = cfg.subagent_idle_timeout;
         let mut answer = String::new();
         let mut emitted: usize = 0;
@@ -687,14 +684,10 @@ impl SubProvider {
         let mut recoveries: u32 = 0;
         let mut last_token_ts = Instant::now();
 
+        // No total time/turn cap: ends on the AGENT_STATUS sentinel or the
+        // idle-and-not-generating backstop below — progress, not a wall clock.
         loop {
             let now = Instant::now();
-            if now > deadline {
-                return DriveOutcome::done_like(
-                    "timeout",
-                    nonempty_or(strip_status(&answer), "[subagent timed out]"),
-                );
-            }
             // dropped-sentinel / stall: idle too long with no generation.
             if now.duration_since(last_token_ts).as_secs_f64() > idle_timeout {
                 match self.chat_state().await {
@@ -812,14 +805,8 @@ impl SubProvider {
                                 return DriveOutcome::done_like("blocked", strip_status(&full));
                             }
                             Some(_) => {
-                                // CONTINUE.
-                                let n = self.turns.fetch_add(1, Ordering::SeqCst) + 1;
-                                if n >= cfg.subagent_max_turns as u64 {
-                                    return DriveOutcome::done_like(
-                                        "timeout",
-                                        nonempty_or(strip_status(&full), "[max turns]"),
-                                    );
-                                }
+                                // CONTINUE. No turn cap: loop until DONE/BLOCKED or
+                                // the idle backstop.
                                 if cfg.human_jitter {
                                     sleep_secs(rand_uniform(0.8, 2.6)).await;
                                 }
