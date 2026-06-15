@@ -408,7 +408,6 @@ pub struct CommandReview {
 }
 
 /// tab/LF/CR are legitimate shell syntax; only truly stealthy controls blocked.
-/// Mirrors STEALTH_CONTROL in command.ts: C0 controls except \t \n \r, DEL, and
 /// the bidi/zero-width formatting block.
 pub fn has_stealth_control_chars(command: &str) -> bool {
     command.chars().any(|c| {
@@ -1644,7 +1643,7 @@ pub async fn run_git(
     Ok(shape_shell_result(command, output, timed_out, started, max_output_bytes))
 }
 
-/// Build the platform shell invocation. Windows -> PowerShell (per the brief);
+/// Build the platform shell invocation. Windows -> PowerShell;
 /// elsewhere -> `sh -c`. `shell: true` in node maps to this.
 fn platform_shell(command: &str) -> tokio::process::Command {
     if cfg!(windows) {

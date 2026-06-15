@@ -92,7 +92,7 @@ fn structured_obj(pairs: Vec<(&str, Option<Value>)>) -> Value {
 /// The TS builds `structuredContent: { ok, ...structured }`. `structured` here is
 /// a JSON object (`Value::Object`); `ok` is spliced in FIRST so a later `ok` key
 /// in `structured` would override it — but the callers never put `ok` in
-/// `structured`, exactly as in the TS, so this matches the spread order.
+/// `structured`, so this matches the spread order.
 pub fn text_reply(ok: bool, structured: Value, text: impl Into<String>, meta: Option<Value>) -> ToolReply {
     let mut obj = serde_json::Map::new();
     obj.insert("ok".to_string(), Value::Bool(ok));

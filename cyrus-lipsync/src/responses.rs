@@ -480,7 +480,7 @@ pub const TOOL_PROTOCOL: &str = concat!(
 
 /// Render the Hannah Montana command-bridge preamble. v1 surfaces the shell
 /// executor only (the `run` fence). Mirrors `build_tool_preamble` — the `tools`
-/// argument is currently unused, exactly as in the Python.
+/// argument is currently unused.
 pub fn build_tool_preamble(_tools: &[Value]) -> String {
     TOOL_PROTOCOL.to_string()
 }

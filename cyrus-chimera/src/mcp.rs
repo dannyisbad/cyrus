@@ -167,7 +167,6 @@ pub fn meta_for_tool(spec: &MetaSpec) -> Map<String, Value> {
         );
         meta.insert(
             "openai/toolInvocation/invoking".to_string(),
-            // Matches harness.ts exactly (ellipsis char, not three dots).
             Value::String("Opening repo surface…".to_string()),
         );
         meta.insert(

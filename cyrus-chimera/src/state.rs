@@ -569,7 +569,7 @@ pub struct UnboundSession {
 ///
 /// Concurrency contract: hold the whole value behind one async lock
 /// (`tokio::sync::Mutex<RepoState>`). Every mutator takes `&mut self` and runs
-/// its file I/O inline, so the lock serializes append+rename exactly as the TS
+/// its file I/O inline, so the lock serializes append+rename
 /// promise queue did.
 pub struct RepoState {
     pub config: RepoAgentConfig,

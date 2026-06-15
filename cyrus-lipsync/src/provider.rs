@@ -1988,10 +1988,10 @@ enum OutItem {
 
 impl ChatGptShadowProvider {
     /// `ChatGPTShadowProvider.stream` — the main turn loop. Returns a receiver of
-    /// [`StreamEvent`]s (the Rust analogue of the Python async generator). The
+    /// [`StreamEvent`]s. The
     /// caller consumes it like `async for item in provider.stream(...)`.
     ///
-    /// The terminal `DoneEvent()` is the last item, exactly as the Python yields
+    /// The terminal `DoneEvent()` is the last item
     /// it after the loop.
     pub async fn stream(
         &self,
@@ -2069,7 +2069,7 @@ impl ChatGptShadowProvider {
             tokio::spawn(async move { bind_watcher(inner, stop_flag).await })
         };
 
-        // The yielding loop (the body of the Python `try:` in stream).
+        // The yielding loop.
         let driver = {
             let inner = Arc::clone(&inner);
             let stop_flag = Arc::clone(&stop_flag);

@@ -143,7 +143,7 @@ pub trait StateAccess: Send + Sync + 'static {
 
 /// A single tool event as emitted on the `/events` SSE stream.
 ///
-/// The inner `Value` is the full `ToolEvent` object exactly as the TS would
+/// The inner `Value` is the full `ToolEvent` object
 /// `JSON.stringify(evt)` it — `seq` lives **inside** it (the TS event carries its
 /// own `.seq`). [`ToolEventLite::seq`] reads that out for the cursor and the
 /// `id:` line so the payload is never duplicated.
@@ -217,7 +217,6 @@ tokio::task_local! {
 }
 
 /// Read the current request's attributed session, if the dispatch set it.
-/// Mirrors `currentSession()` in core/context.ts.
 pub fn current_session() -> Option<String> {
     CURRENT_SESSION.try_with(|s| s.clone()).ok().flatten()
 }
@@ -607,7 +606,7 @@ async fn dispatch(
         };
         let mcp = app.mcp.clone();
         // Run the dispatch inside the task-local session scope so the state layer's
-        // `event()` can read it synchronously (the AsyncLocalStorage analogue),
+        // `event()` can read it synchronously,
         // while `mcp_req.session` carries it explicitly as well.
         return CURRENT_SESSION
             .scope(session, async move { mcp.handle_request(mcp_req) })

@@ -89,7 +89,7 @@ fn base64_url_encode(buf: &[u8]) -> String {
         _ => {}
     }
     // Translate to the URL-safe alphabet. (We emitted `+`/`/` above to keep the
-    // table simple; swap them now exactly as the TS does.)
+    // table simple; swap them now.)
     out.replace('+', "-").replace('/', "_")
 }
 
@@ -283,7 +283,7 @@ fn generate_csrf_token() -> String {
 }
 
 /// Constant-time byte comparison for equal-length slices (TS `timingSafeEqual`).
-/// The caller is responsible for the length check, exactly as the TS does (it
+/// The caller is responsible for the length check (it
 /// compares `length` first, then calls `timingSafeEqual`).
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
