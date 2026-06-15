@@ -1,44 +1,16 @@
 //! ChatGPTShadowProvider — the single-tab driver: paste a prompt, send it, watch
 //! the WS tap, drive auto-continue, and fan in chimera's tool events. Also hosts
-//! the off-codex subagent spawn/bind/run loops (the pre-conductor path).
+//! the off-codex subagent spawn/bind/run loops.
 //!
-//! Source: idare/shadow/provider.py (private original)
-//!         (+ chat.py / server_events.py / subprovider.py / tab_factory.py, which
-//!          provider.py imports — see the "self-contained" note below)
+//! This is the legacy single-main-tab path; `conductor.rs`'s ThreadConductor is
+//! the newer per-thread design. The turn state machine lives HERE and must NOT be
+//! duplicated into the conductor.
 //!
-//! # Why this module is self-contained
-//!
-//! provider.py imports `ChatSurface` + `FETCH_WRAPPER_JS` + the recovery-message
-//! helpers from `chat.py`, `stream_server_events` from `server_events.py`,
-//! `SubProvider` from `subprovider.py`, and `TabFactory` + `arm_and_navigate`
-//! from `tab_factory.py`, plus the `TextEvent`/`ToolCallEvent`/`ToolResultEvent`/
-//! `DoneEvent` dataclasses from `ui/stream_events.py`. None of those have a Rust
-//! home module in this crate's `lib.rs` (chat / server_events / subprovider /
-//! stream_events are not declared; `tab_factory`'s port is a stub). The port brief
-//! restricts this task to ONE file and forbids editing `lib.rs`, so the pieces
-//! provider.py pulls in are ported alongside it here, in private submodules, while
-//! the crate types that DO exist and are usable (`ShadowConfig`, `CdpClient`,
-//! `WsTap`) are reused from their modules.
-//!
-//! # Port plan (provider.py, byte-faithful behavior)
-//!   - `stream(user_input, session_id) -> impl Stream<Item = StreamEvent>`: the
-//!     main turn loop. `drive_main` pastes the prompt (with first-turn preamble),
-//!     sends, consumes WS tap events into an out queue, and merges chimera /control
-//!     tool events so their order vs streamed text is preserved.
-//!   - /control client helpers (`ctrl_get`/`ctrl_post`).
-//!   - `spawn_watcher` / `run_sub` / `bind_watcher`: the elimination-binding
-//!     subagent path (superseded by the conductor's per-thread routing, but still
-//!     the working path until the four deprecation checks pass).
-//!   - `interrupt()`, `clear_session()`, `close()`.
-//!
-//! # Hazards
-//!   - This is the OLD single-main-tab provider; `conductor.rs`'s ThreadConductor
-//!     is the newer per-thread design. The turn state machine lives HERE (legacy
-//!     path) and must NOT be duplicated into the conductor.
+//! Load-bearing invariants:
 //!   - Auto-continue cadence + human jitter stay bounded so the loop can't
 //!     livelock; the AGENT_STATUS sentinel (CONTINUE/DONE/BLOCKED) terminates it.
-//!   - `FETCH_WRAPPER_JS` is reverse-engineered wire-format and is copied
-//!     byte-for-byte from chat.py.
+//!   - Each tab opens its own page socket (one tab = one CdpClient = one WsTap);
+//!     a shared socket reintroduces cross-thread token cross-talk.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -53,42 +25,35 @@ use crate::config::ShadowConfig;
 use crate::wstap::WsTap;
 
 // ---------------------------------------------------------------------------
-// Streaming UI events (ui/stream_events.py) — the dataclasses the TUI renders.
+// Streaming UI events — the variants the TUI renders.
 // ---------------------------------------------------------------------------
 
-/// Streaming UI event. Mirrors the `StreamEvent` dataclass hierarchy in
-/// `ui/stream_events.py` (only the variants provider.py emits are modelled:
-/// Text / ToolCall / ToolResult / Done). The optional `origin` tag is the dynamic
-/// attribute the Python sets via `ev.origin = ...` and the TUI reads with
-/// `getattr(ev, "origin", None)` — `None` for the main model's own text, a string
+/// Streaming UI event the TUI renders (only the emitted variants are modelled).
+/// The optional `origin` tag is `None` for the main model's own text, a string
 /// ("orchestrator" or a subagent id) otherwise.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    /// `TextEvent(content)`.
     Text {
         content: String,
         origin: Option<String>,
     },
-    /// `ToolCallEvent(call_id, name, arguments)`.
     ToolCall {
         call_id: String,
         name: String,
         arguments: Value,
         origin: Option<String>,
     },
-    /// `ToolResultEvent(call_id, success, content)`.
     ToolResult {
         call_id: String,
         success: bool,
         content: String,
         origin: Option<String>,
     },
-    /// `DoneEvent()`.
     Done,
 }
 
 impl StreamEvent {
-    /// `TextEvent(content=...)` with no origin.
+    /// Text event with no origin.
     fn text(content: impl Into<String>) -> Self {
         StreamEvent::Text {
             content: content.into(),
@@ -97,8 +62,8 @@ impl StreamEvent {
     }
 }
 
-/// `_orch(text)` — an orchestrator narrative line (spawned/done/waiting), rendered
-/// by the TUI as a dim status line, not mixed into the main model's message text.
+/// An orchestrator narrative line (spawned/done/waiting), rendered by the TUI as a
+/// dim status line, not mixed into the main model's message text.
 fn orch(text: impl Into<String>) -> StreamEvent {
     StreamEvent::Text {
         content: text.into(),
@@ -106,7 +71,7 @@ fn orch(text: impl Into<String>) -> StreamEvent {
     }
 }
 
-/// Tag any event with an origin (subagent id). Mirrors `subprovider._tag`.
+/// Tag any event with an origin (subagent id).
 fn tag(mut ev: StreamEvent, origin: &str) -> StreamEvent {
     match &mut ev {
         StreamEvent::Text { origin: o, .. }
@@ -120,10 +85,9 @@ fn tag(mut ev: StreamEvent, origin: &str) -> StreamEvent {
 // ---------------------------------------------------------------------------
 // Bounded human-jitter RNG.
 //
-// The Python uses `random` (uniform / choice / random). `rand` is not a declared
-// dependency, so a tiny self-seeded xorshift64* stands in: it only blurs timing
-// (bounded so it can never break the loop), so cryptographic quality is
-// irrelevant — only that the values land inside the documented bounds.
+// A tiny self-seeded xorshift64*: it only blurs timing (bounded so it can never
+// break the loop), so cryptographic quality is irrelevant — only that the values
+// land inside the documented bounds.
 // ---------------------------------------------------------------------------
 
 pub(crate) struct Jitter {
@@ -153,17 +117,17 @@ impl Jitter {
         x.wrapping_mul(0x2545F4914F6CDD1D)
     }
 
-    /// `random.random()` in [0, 1).
+    /// A uniform float in [0, 1).
     fn random(&self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// `random.uniform(a, b)`.
+    /// A uniform float in [a, b).
     fn uniform(&self, a: f64, b: f64) -> f64 {
         a + (b - a) * self.random()
     }
 
-    /// `random.choice(seq)` — None for an empty slice.
+    /// A random element, or None for an empty slice.
     fn choice<'a, T>(&self, seq: &'a [T]) -> Option<&'a T> {
         if seq.is_empty() {
             None
@@ -175,14 +139,13 @@ impl Jitter {
 }
 
 // ---------------------------------------------------------------------------
-// AGENT_STATUS sentinel + recovery-message helpers (chat.py).
+// AGENT_STATUS sentinel + recovery-message helpers.
 // ---------------------------------------------------------------------------
 
-/// `parse_status(text)` — the LAST `<<<AGENT_STATUS: ...>>>` sentinel, or None.
-///
-/// Mirrors `_STATUS_RE = r"<<<\s*AGENT_STATUS:\s*(CONTINUE|DONE|BLOCKED)([^>]*)>>>"`
-/// (case-insensitive). Returns `(status_upper, detail)` where `detail` is the
-/// trailing group with a leading ": " / ":" / whitespace stripped, then trimmed.
+/// The LAST `<<<AGENT_STATUS: (CONTINUE|DONE|BLOCKED)...>>>` sentinel, or None
+/// (case-insensitive; last wins). Returns `(status_upper, detail)` where `detail`
+/// is the trailing group with a leading ": " / ":" / whitespace stripped, then
+/// trimmed.
 fn parse_status(text: &str) -> Option<(String, String)> {
     let mut last: Option<(String, String)> = None;
     let bytes = text.as_bytes();
@@ -227,13 +190,13 @@ fn parse_status_at(text: &str, start: usize) -> Option<(String, String, usize)> 
     if !after.starts_with(">>>") {
         return None;
     }
-    // .lstrip(": ").strip()  — strip any leading ':' or ' ' chars, then trim.
+    // strip any leading ':' or ' ' chars, then trim.
     let detail = detail_raw.trim_start_matches([':', ' ']).trim().to_string();
     let end = text.len() - after.len() + 3; // index just past ">>>"
     Some((status.to_string(), detail, end))
 }
 
-/// `strip_status(text)` — remove every AGENT_STATUS sentinel and rstrip.
+/// Remove every AGENT_STATUS sentinel and rstrip.
 fn strip_status(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let bytes = text.as_bytes();
@@ -297,8 +260,8 @@ fn tool_lines(tools: &[TurnTool]) -> Vec<String> {
         .collect()
 }
 
-/// `block_recovery_msg(tools)` — re-deliver server-confirmed tool outcomes after
-/// post-execution moderation withheld them from the model.
+/// Re-deliver server-confirmed tool outcomes after post-execution moderation
+/// withheld them from the model. These actions already happened; do not retry.
 fn block_recovery_msg(tools: &[TurnTool]) -> String {
     let lines = tool_lines(tools).join("\n");
     format!(
@@ -310,7 +273,8 @@ again — the result comes back labeled `RESULT (BASE64)`, which you decode. Con
     )
 }
 
-/// `loop_recovery_msg(tool, count, tools)` — break an in-turn retry loop.
+/// Break an in-turn retry loop: the call ran but its output didn't come through,
+/// so steer toward one re-issue or a different step rather than another repeat.
 fn loop_recovery_msg(tool: &str, count: u32, tools: &[TurnTool]) -> String {
     let lines = tool_lines(tools);
     let body = if lines.is_empty() {
@@ -327,9 +291,9 @@ and it is still empty, proceed with what you have or take a different step inste
 }
 
 // ---------------------------------------------------------------------------
-// FETCH_WRAPPER_JS — reverse-engineered wire-format string, byte-for-byte from
-// chat.py. Forces supports_buffering=false + model/effort/gizmo overrides on the
-// /f/conversation turn body, and tees the inline SSE body to __shadowStream.
+// FETCH_WRAPPER_JS — reverse-engineered wire-format string. Forces
+// supports_buffering=false + model/effort/gizmo overrides on the /f/conversation
+// turn body, and tees the inline SSE body to __shadowStream.
 // ---------------------------------------------------------------------------
 
 pub(crate) const FETCH_WRAPPER_JS: &str = r#"
@@ -399,7 +363,7 @@ pub(crate) const FETCH_WRAPPER_JS: &str = r#"
 })()
 "#;
 
-// DOM-interaction JS snippets (chat.py). Verbatim.
+// DOM-interaction JS snippets.
 
 const STATE_JS: &str = r#"
 (() => {
@@ -470,7 +434,7 @@ const JS_COMPOSER_READY: &str = "(()=>!!(document.querySelector('#prompt-textare
 
 const JS_MODELS: &str = "(async()=>{try{const s=await (await fetch('/api/auth/session',{credentials:'include'})).json();const r=await fetch('/backend-api/models?history_and_training_disabled=false',{headers:{Authorization:'Bearer '+s.accessToken},credentials:'include'});const j=await r.json();return (j.models||[]).map(m=>({slug:m.slug,title:m.title}));}catch(e){return [];}})()";
 
-// thinking_effort accepted backend values + friendly aliases (chat.py).
+// thinking_effort accepted backend values + friendly aliases.
 pub(crate) fn resolve_effort(spec: Option<&str>) -> Option<String> {
     let s = spec?.trim().to_lowercase();
     // codex's reasoning-effort ladder (none < minimal < low < medium < high <
@@ -490,7 +454,7 @@ pub(crate) fn resolve_effort(spec: Option<&str>) -> Option<String> {
 const LANES: [&str; 4] = ["instant", "thinking", "pro", "auto"];
 
 // ---------------------------------------------------------------------------
-// ChatSurface (chat.py) — the brittle DOM bits, isolated.
+// ChatSurface — the brittle DOM bits, isolated.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -500,7 +464,7 @@ pub(crate) struct ChatState {
     pub(crate) has_approve: bool,
 }
 
-/// See `ChatSurface` in chat.py.
+/// The brittle DOM-driving surface for one ChatGPT tab.
 ///
 /// `pub(crate)`: the conductor runtime ([`crate::runtime`]) adapts this concrete
 /// page surface to the conductor's `ChatSurface` trait (one adapter per booted
@@ -516,7 +480,6 @@ impl ChatSurface {
         Self { cdp, cfg, jitter }
     }
 
-    /// `ChatSurface.state`.
     pub(crate) async fn state(&self) -> anyhow::Result<ChatState> {
         let v = self.cdp.eval(STATE_JS, 30.0).await?;
         Ok(ChatState {
@@ -535,7 +498,7 @@ impl ChatSurface {
         })
     }
 
-    /// `ChatSurface.inject` — type text into the composer and submit it.
+    /// Type text into the composer and submit it.
     pub(crate) async fn inject(&self, text: &str) -> anyhow::Result<()> {
         let _ = self.cdp.eval(FOCUS_JS, 30.0).await;
         self.cdp.insert_text(text).await?;
@@ -564,16 +527,15 @@ impl ChatSurface {
         Ok(())
     }
 
-    /// `ChatSurface.approve`.
     pub(crate) async fn approve(&self) -> anyhow::Result<()> {
         let _ = self.cdp.eval(CLICK_APPROVE_JS, 30.0).await;
         Ok(())
     }
 
-    /// `ChatSurface.stop` — click stop, wait until generation has FULLY halted
-    /// (not-generating AND composerReady, STABLE across two reads). Re-clicks stop
-    /// periodically in case the first click raced the button. Returns true once
-    /// stably stopped+ready. Default timeout 30s.
+    /// Click stop, wait until generation has FULLY halted (not-generating AND
+    /// composerReady, STABLE across two reads). Re-clicks stop periodically in case
+    /// the first click raced the button. Returns true once stably stopped+ready.
+    /// Default timeout 30s.
     pub(crate) async fn stop(&self) -> bool {
         self.stop_with_timeout(30.0).await
     }
@@ -606,8 +568,7 @@ impl ChatSurface {
         false
     }
 
-    /// `ChatSurface._wait_composer` — poll for the composer instead of a blind
-    /// sleep. Default timeout 12s.
+    /// Poll for the composer instead of a blind sleep. Default timeout 12s.
     pub(crate) async fn wait_composer(&self) -> bool {
         let deadline = Instant::now() + Duration::from_secs_f64(12.0);
         while Instant::now() < deadline {
@@ -621,7 +582,6 @@ impl ChatSurface {
         false
     }
 
-    /// `ChatSurface.available_models`.
     async fn available_models(&self) -> Vec<(String, String)> {
         match self.cdp.eval(JS_MODELS, 30.0).await {
             Ok(Value::Array(items)) => items
@@ -640,9 +600,8 @@ impl ChatSurface {
         }
     }
 
-    /// `ChatSurface.resolve_slug` — map a real slug or friendly spec to a live
-    /// account slug. None -> None; falls back to the spec unchanged if nothing
-    /// matches.
+    /// Map a real slug or friendly spec to a live account slug. None -> None;
+    /// falls back to the spec unchanged if nothing matches.
     pub(crate) async fn resolve_slug(&self, spec: Option<&str>) -> Option<String> {
         let spec = spec?;
         if spec.is_empty() {
@@ -681,9 +640,9 @@ impl ChatSurface {
         Some(spec.to_string()) // let ChatGPT ignore/reject rather than silently swap
     }
 
-    /// `ChatSurface.set_overrides` — force model and/or reasoning effort on every
-    /// subsequent turn. Resolves a friendly model spec / effort alias. Passing
-    /// neither clears the override. Persisted in localStorage.
+    /// Force model and/or reasoning effort on every subsequent turn. Resolves a
+    /// friendly model spec / effort alias. Passing neither clears the override.
+    /// Persisted in localStorage.
     async fn set_overrides(
         &self,
         model: Option<&str>,
@@ -706,15 +665,15 @@ impl ChatSurface {
         } else {
             // localStorage.setItem('__shadow_overrides', <json string of json string>)
             let inner = serde_json::to_string(&Value::Object(ov))?;
-            let arg = serde_json::to_string(&inner)?; // json.dumps(json.dumps(ov))
+            let arg = serde_json::to_string(&inner)?; // double-encode: a JSON string of the JSON string
             let js = format!("localStorage.setItem('__shadow_overrides',{arg})");
             let _ = self.cdp.eval(&js, 30.0).await;
         }
         Ok(())
     }
 
-    /// `ChatSurface.new_chat` -> `new_thread` — open a FRESH conversation pinned to
-    /// the configured model lane + effort. Used by `clear_session`.
+    /// Open a FRESH conversation pinned to the configured model lane + effort.
+    /// Used by `clear_session`.
     async fn new_chat(&self) -> anyhow::Result<()> {
         let slug = self.resolve_slug(self.cfg.model_slug.as_deref()).await;
         let eff = self.cfg.thinking_effort.clone();
@@ -729,7 +688,7 @@ impl ChatSurface {
     }
 }
 
-/// `re.search(r"(\d+(?:[.\-]\d+)*)", s)` then `.replace(".", "-")`.
+/// First dotted/dashed version number in `s`, with dots normalized to dashes.
 fn parse_version(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -762,12 +721,11 @@ fn parse_version(s: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// tab_factory.py — BrowserControl + TabFactory + arm_and_navigate.
+// Tab lifecycle — BrowserControl + TabFactory + arm_and_navigate.
 //
-// A BROWSER-scoped CDP control socket for Target.* operations (reusing the page
-// CdpClient's raw-TCP /json discovery + tokio-tungstenite transport would require
-// a page target; the browser endpoint lives at /json/version). We talk to the
-// browser endpoint over its own tungstenite socket here.
+// A BROWSER-scoped CDP control socket for Target.* operations (the page CdpClient
+// needs a page target; the browser endpoint lives at /json/version). We talk to
+// the browser endpoint over its own tungstenite socket here.
 // ---------------------------------------------------------------------------
 
 use futures::stream::StreamExt as _;
@@ -778,7 +736,7 @@ use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 type BrowserWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TokioTcpStream>>;
 
-/// Browser-scoped CDP socket for Target.* operations. See `BrowserControl`.
+/// Browser-scoped CDP socket for Target.* operations.
 struct BrowserControl {
     host: String,
     port: u16,
@@ -796,15 +754,13 @@ impl BrowserControl {
         }
     }
 
-    /// `BrowserControl.base` — `http://{host}:{port}`. The Python property builds
-    /// the `/json*` URLs; this port's `connect`/`http_get` take host+port
-    /// directly, so the method is kept only as parity surface.
-    #[allow(dead_code)] // parity with tab_factory.py's BrowserControl.base
+    /// `http://{host}:{port}`. Unused: `connect`/`http_get` take host+port directly.
+    #[allow(dead_code)]
     fn base(&self) -> String {
         format!("http://{}:{}", self.host, self.port)
     }
 
-    /// `BrowserControl.connect` — open the browser-endpoint socket.
+    /// Open the browser-endpoint socket.
     async fn connect(&self) -> anyhow::Result<()> {
         let body = http_get(&self.host, self.port, "/json/version").await?;
         let ver: Value = serde_json::from_str(&body)?;
@@ -823,8 +779,8 @@ impl BrowserControl {
         Ok(())
     }
 
-    /// `BrowserControl._cmd` — id-correlated Target.* command (serialized by the
-    /// ws lock). Default timeout 20s.
+    /// Id-correlated Target.* command (serialized by the ws lock). Default
+    /// timeout 20s.
     async fn cmd(&self, method: &str, params: Value) -> anyhow::Result<Value> {
         let mid = self.id.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let mut guard = self.ws.lock().await;
@@ -884,9 +840,8 @@ impl BrowserControl {
     }
 }
 
-/// `arm_and_navigate(cdp, url, init_scripts)` — arm document-start scripts +
-/// Network BEFORE navigating, so the page's own socket can't open ahead of our
-/// taps. `cdp` is a connected page `CdpClient`.
+/// Arm document-start scripts + Network BEFORE navigating, so the page's own
+/// socket can't open ahead of our taps. `cdp` is a connected page `CdpClient`.
 async fn arm_and_navigate(cdp: &CdpClient, url: &str, init_scripts: &[&str]) -> anyhow::Result<()> {
     cdp.send("Page.enable", None).await?;
     for src in init_scripts {
@@ -902,7 +857,7 @@ async fn arm_and_navigate(cdp: &CdpClient, url: &str, init_scripts: &[&str]) -> 
     Ok(())
 }
 
-/// `TabFactory` — tab lifecycle over the browser control socket.
+/// Tab lifecycle over the browser control socket.
 struct TabFactory {
     cfg: ShadowConfig,
     browser: BrowserControl,
@@ -923,8 +878,7 @@ impl TabFactory {
         self.browser.connect().await
     }
 
-    /// `TabFactory.open_tab` — create a tab at about:blank (caller arms+navigates).
-    /// Returns the target id.
+    /// Create a tab at about:blank (caller arms+navigates). Returns the target id.
     async fn open_tab(&self, _url: &str, _agent_id: &str, human: bool) -> anyhow::Result<String> {
         if human {
             sleep_secs(self.jitter.uniform(0.3, 1.1)).await;
@@ -933,7 +887,7 @@ impl TabFactory {
         if human {
             self.browser.activate_target(&target_id).await;
         }
-        let _ = &self.cfg; // cfg retained for parity (manifest path unused in this port)
+        let _ = &self.cfg; // cfg retained though its manifest path is unused here
         Ok(target_id)
     }
 
@@ -947,16 +901,12 @@ impl TabFactory {
 }
 
 // ---------------------------------------------------------------------------
-// server_events.py — tail the repo-agent server's /events SSE stream.
+// Server events — tail the repo-agent server's /events SSE stream.
 // ---------------------------------------------------------------------------
 
-/// `stream_server_events(server_url, agent)` — spawn a task that tails GET
-/// `/events[?agent=<id>]` and forwards each parsed tool-event dict into `sink`.
-///
-/// The Python is an async generator yielding dicts; in Rust we push each `Value`
-/// into an mpsc sender (the caller's queue). Returns the task handle so the caller
-/// can cancel it. Failures are swallowed (the Python wrapped the whole loop in
-/// `try/except: pass`).
+/// Spawn a task that tails GET `/events[?agent=<id>]` and forwards each parsed
+/// tool-event `Value` into `sink`. Returns the task handle so the caller can
+/// cancel it. Failures are swallowed (best-effort).
 ///
 /// `pub(crate)`: the conductor runtime (`ShimRuntime::spawn_server_events_tail`)
 /// reuses this exact tail as its per-turn connector-tool liveness feed.
@@ -993,8 +943,7 @@ async fn tail_events(
     stream.flush().await?;
 
     // Read until we pass the header terminator, then parse SSE `data:` lines
-    // incrementally. sock_read had no timeout in the Python (total=None,
-    // sock_read=None) — this is a long-lived stream.
+    // incrementally. No read timeout — this is a long-lived stream.
     let mut buf: Vec<u8> = Vec::new();
     let mut header_done = false;
     let mut chunk = [0u8; 4096];
@@ -1041,11 +990,11 @@ async fn tail_events(
 }
 
 // ---------------------------------------------------------------------------
-// SubProvider (subprovider.py) — drives ONE ChatGPT tab/conversation to
-// completion of ONE task. Owns its own page socket, ChatSurface, WSTap, queue.
+// SubProvider — drives ONE ChatGPT tab/conversation to completion of ONE task.
+// Owns its own page socket, ChatSurface, WSTap, queue.
 // ---------------------------------------------------------------------------
 
-/// The terminal capsule a subagent returns (`run`'s return dict).
+/// The terminal capsule a subagent returns.
 #[derive(Clone)]
 struct SubResult {
     status: String,
@@ -1053,21 +1002,19 @@ struct SubResult {
     files_touched: Vec<String>,
 }
 
-/// WS-tap item routed into a SubProvider's queue. Mirrors the `("ws", kind, val)`
-/// tuples in subprovider.py.
+/// WS-tap item routed into a SubProvider's queue.
 enum WsItem {
     Token(String),
     TurnComplete(String),
-    /// other tap kinds (e.g. "thinking") are ignored by the drive loop, matching
-    /// the Python (it only branches on token / turn_complete).
+    /// Other tap kinds (e.g. "thinking") are ignored by the drive loop, which only
+    /// branches on token / turn_complete.
     Other,
 }
 
-/// See `SubProvider` in subprovider.py.
+/// Drives ONE subagent tab to completion.
 ///
 /// Owns ONE stable WS queue (created in `new`, armed once in `attach`, drained in
-/// `run`/`drive`) — exactly like the Python's `self.queue` + the single `_on_ws`
-/// callback bound in `attach`. Re-arming a second tap on the same CDP client would
+/// `run`/`drive`). Re-arming a second tap on the same CDP client would
 /// double-register the frame handlers (the registry accumulates), so the tap is
 /// created exactly once.
 struct SubProvider {
@@ -1075,10 +1022,9 @@ struct SubProvider {
     agent_id: String,
     target_id: String,
     task: String,
-    /// Python keeps `self.label = label or agent_id` for the mux's operator
-    /// spawn-log line; the consumer is outside the ported surface, so the field
-    /// is parity-only here.
-    #[allow(dead_code)] // parity with subprovider.py's self.label
+    /// `label or agent_id`, for the mux's operator spawn-log line. Unused here:
+    /// the consumer lives outside this surface.
+    #[allow(dead_code)]
     label: String,
     model: Option<String>,
     effort: Option<String>,
@@ -1192,7 +1138,7 @@ impl SubProvider {
         F: Fn(StreamEvent) + Send + Sync,
     {
         // The tap armed in `attach` already feeds the stable per-sub queue; take
-        // its receiver here (the Python uses one `self.queue` for the run).
+        // its receiver here.
         let ws_rx = match self.ws_rx.lock().await.take() {
             Some(rx) => rx,
             None => {
@@ -1818,7 +1764,7 @@ struct Inner {
     cdp: Mutex<Option<Arc<CdpClient>>>,
     chat: Mutex<Option<Arc<ChatSurface>>>,
     wstap: Mutex<Option<WsTap>>,
-    /// The active turn's WS-tap sender (the Python's `self._queue`). The ONE tap,
+    /// The active turn's WS-tap sender. The ONE tap,
     /// armed once in `ensure`, pushes WS events into whatever sender is here;
     /// `stream` swaps it per turn and clears it (None) when the turn ends, exactly
     /// like `_on_ws` guarding `if self._queue is not None`. A `std::sync::Mutex`

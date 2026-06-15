@@ -1,24 +1,21 @@
 //! Configuration loading + permission profiles.
 //!
-//! Source: repo-agent-mcp/src/config.ts (private original)
-//!         (+ shapes from .../src/types.ts)
-//!
-//! Port plan:
-//!   - `RepoAgentConfig` struct mirroring types.ts (root/homeRoot, port/host,
-//!     bearerToken/publicUrl, sandboxMode/approvalPolicy, command allow/deny
-//!     prefix lists, blockedPathGlobs, autoCompact tuning, subagent caps).
+//! Contents:
+//!   - `RepoAgentConfig`: root/homeRoot, port/host, bearerToken/publicUrl,
+//!     sandboxMode/approvalPolicy, command allow/deny prefix lists,
+//!     blockedPathGlobs, autoCompact tuning, subagent caps.
 //!   - DEFAULT_PERMISSION_PROFILES: read-only / auto / full-access.
-//!   - loadConfig(): merge order is DEFAULTS < repo-agent.config.json < env <
+//!   - load_config(): merge order is DEFAULTS < repo-agent.config.json < env <
 //!     argv, with realpath canonicalization of root/homeRoot/writableRoots.
-//!   - wantsHttp(): `--http` present OR `--stdio` absent.
+//!   - wants_http(): `--http` present OR `--stdio` absent.
 //!
-//! Hazards (preserved below):
-//!   - The TS `realpathSync`'s the root; on Windows we mirror with `dunce` so a
-//!     `\\?\` UNC/verbatim prefix never leaks into later path-containment checks.
+//! Hazards:
+//!   - On Windows we canonicalize the root via `dunce` so a `\\?\` UNC/verbatim
+//!     prefix never leaks into later path-containment checks.
 //!   - Env precedence differs per field. `REPO_AGENT_TOKEN` (and
-//!     `REPO_AGENT_PUBLIC_URL`) use JS `||` semantics: a present-but-empty env
-//!     value falls through to the file/default. `port`/`host` use `??` (nullish)
-//!     semantics: only an absent value falls through. Both are reproduced exactly.
+//!     `REPO_AGENT_PUBLIC_URL`) use `||` semantics: a present-but-empty env value
+//!     falls through to the file/default. `port`/`host` use `??` (nullish)
+//!     semantics: only an absent value falls through.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
-// Enums (types.ts)
+// Enums
 // ---------------------------------------------------------------------------
 
 /// `SpiceLevel` — "mild" | "spicy" | "feral".
@@ -66,10 +63,10 @@ pub enum ApprovalReviewer {
 }
 
 // ---------------------------------------------------------------------------
-// Nested config shapes (types.ts)
+// Nested config shapes
 // ---------------------------------------------------------------------------
 
-/// `AutoCompactConfig` from types.ts.
+/// Auto-compaction tuning.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoCompactConfig {
     pub enabled: bool,
@@ -89,9 +86,8 @@ pub struct AutoCompactConfig {
     pub return_capsule_every_n_events: i64,
 }
 
-/// `PermissionProfile` from types.ts. Mirrors `Partial<PermissionProfile>` —
-/// every field is optional so file overrides can specify just a subset, exactly
-/// like the TS `Record<string, Partial<PermissionProfile>>`.
+/// A permission profile. Every field is optional so a file override can specify
+/// just a subset.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PermissionProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,8 +134,8 @@ pub struct PermissionProfile {
     pub command_deny_regex: Option<Vec<String>>,
 }
 
-/// `ProjectConfig` from types.ts (post-normalization: `root` is canonicalized,
-/// `tags` is always present).
+/// A configured project (post-normalization: `root` is canonicalized, `tags` is
+/// always present).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,7 +147,7 @@ pub struct ProjectConfig {
     pub tags: Vec<String>,
 }
 
-/// `RepoAgentConfig` from types.ts — the fully-merged runtime config.
+/// The fully-merged runtime config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoAgentConfig {
     pub root: String,
@@ -234,16 +230,16 @@ pub struct RepoAgentConfig {
 pub type Config = RepoAgentConfig;
 
 // ---------------------------------------------------------------------------
-// DEFAULT_PERMISSION_PROFILES (config.ts)
+// DEFAULT_PERMISSION_PROFILES
 // ---------------------------------------------------------------------------
 
 fn vecs(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| (*s).to_string()).collect()
 }
 
-/// `DEFAULT_PERMISSION_PROFILES` — three named profiles. Insertion order
-/// ("read-only", "auto", "full-access") is preserved via an ordered map so the
-/// serialized shape matches the TS object literal.
+/// The three named default profiles. Insertion order ("read-only", "auto",
+/// "full-access") is preserved via an ordered map so the serialized shape is
+/// stable.
 fn default_permission_profiles() -> BTreeMap<String, PermissionProfile> {
     let mut map = BTreeMap::new();
 
@@ -364,11 +360,11 @@ fn default_permission_profiles() -> BTreeMap<String, PermissionProfile> {
 }
 
 // ---------------------------------------------------------------------------
-// DEFAULTS (config.ts) — env-derived bits resolved at call time.
+// DEFAULTS — env-derived bits resolved at call time.
 // ---------------------------------------------------------------------------
 
-/// JS `||` truthiness over an env var: returns `Some(value)` only when the var
-/// is set AND non-empty (an empty string is falsy in JS, so it falls through).
+/// `||` truthiness over an env var: returns `Some(value)` only when the var is
+/// set AND non-empty (an empty string falls through).
 fn env_nonempty(key: &str) -> Option<String> {
     match std::env::var(key) {
         Ok(v) if !v.is_empty() => Some(v),
@@ -376,11 +372,8 @@ fn env_nonempty(key: &str) -> Option<String> {
     }
 }
 
-/// `Number(process.env.PORT ?? 8787)`.
-///
-/// `??` is nullish: only an *absent* `PORT` falls through to 8787; an empty
-/// `PORT` is passed to `Number("")` which is `0`. We reproduce that: present →
-/// `js_number()`, absent → 8787.
+/// `PORT ?? 8787` with nullish semantics: only an *absent* `PORT` falls through
+/// to 8787; an empty `PORT` coerces to `0` via [`js_number`].
 fn default_port() -> f64 {
     match std::env::var("PORT") {
         Ok(v) => js_number(&v),
@@ -388,7 +381,7 @@ fn default_port() -> f64 {
     }
 }
 
-/// `process.env.HOST ?? "127.0.0.1"` (nullish: empty HOST is kept).
+/// `HOST ?? "127.0.0.1"` (nullish: an empty HOST is kept).
 fn default_host() -> String {
     std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
@@ -489,21 +482,20 @@ fn default_auto_compact() -> AutoCompactConfig {
 }
 
 // ---------------------------------------------------------------------------
-// argv / path helpers (config.ts)
+// argv / path helpers
 // ---------------------------------------------------------------------------
 
-/// `process.argv` equivalent. Node's argv is `[node, script, ...args]`; Rust's
-/// is `[program, ...args]`. The original scans the *whole* vector for flags, and
-/// flag names never collide with the interpreter/program path, so scanning all
-/// of `std::env::args()` reproduces the behavior.
+/// All process arguments. Flags are scanned across the *whole* vector; flag
+/// names never collide with the program path, so scanning all of
+/// `std::env::args()` is safe.
 fn argv() -> Vec<String> {
     std::env::args().collect()
 }
 
-/// `argValue(name)` — `--name <value>` or `--name=value` (first match wins).
+/// `--name <value>` or `--name=value` (first match wins).
 fn arg_value(args: &[String], name: &str) -> Option<String> {
     if let Some(idx) = args.iter().position(|a| a == name) {
-        // TS: process.argv[idx + 1] — may be undefined past the end.
+        // May be None past the end of the vector.
         return args.get(idx + 1).cloned();
     }
     let prefix = format!("{name}=");
@@ -512,16 +504,15 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
         .map(|a| a[prefix.len()..].to_string())
 }
 
-/// `resolve(path)` — absolutize against the current working directory using
-/// Node's lexical `path.resolve` rules (no filesystem access, no symlink
-/// resolution). Trailing components like `.`/`..` are collapsed.
+/// Absolutize against the current working directory using lexical `resolve`
+/// rules (no filesystem access, no symlink resolution). Trailing components like
+/// `.`/`..` are collapsed.
 fn resolve(path: &str) -> PathBuf {
     resolve_from(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), path)
 }
 
-/// `resolve(base, path)` — Node's two-arg `path.resolve`: if `path` is absolute
-/// it wins outright, otherwise it is joined onto `base`. Result is normalized
-/// lexically.
+/// Two-arg resolve: if `path` is absolute it wins outright, otherwise it is
+/// joined onto `base`. Result is normalized lexically.
 fn resolve_from(base: &Path, path: &str) -> PathBuf {
     let p = Path::new(path);
     let joined = if p.is_absolute() {
@@ -532,8 +523,8 @@ fn resolve_from(base: &Path, path: &str) -> PathBuf {
     normalize_lexically(&joined)
 }
 
-/// Lexical normalization mirroring Node's `path` collapse of `.` and `..`
-/// without touching the filesystem (so it works on non-existent paths).
+/// Lexical normalization: collapse `.` and `..` without touching the filesystem
+/// (so it works on non-existent paths).
 fn normalize_lexically(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out: Vec<Component> = Vec::new();
@@ -561,9 +552,9 @@ fn normalize_lexically(p: &Path) -> PathBuf {
     buf
 }
 
-/// Canonicalize an *existing* path the way `realpathSync` does, but strip the
-/// Windows `\\?\` verbatim/UNC prefix (via `dunce`) so containment checks done
-/// later compare apples to apples. Returns the input on any failure.
+/// Canonicalize an *existing* path, stripping the Windows `\\?\` verbatim/UNC
+/// prefix (via `dunce`) so later containment checks compare apples to apples.
+/// Returns the input on any failure.
 fn realpath_existing(p: &Path) -> PathBuf {
     match dunce::canonicalize(p) {
         Ok(real) => real,
@@ -571,9 +562,8 @@ fn realpath_existing(p: &Path) -> PathBuf {
     }
 }
 
-/// `realpathMaybe(path)` — `resolve(path)`, then `realpathSync` it iff it exists,
-/// else return the resolved path untouched. The TS guards with `existsSync`; we
-/// fold that into `realpath_existing` (canonicalize fails → fall back).
+/// `resolve(path)`, then canonicalize it iff it exists, else return the resolved
+/// path untouched.
 fn realpath_maybe(path: &str) -> String {
     let resolved = resolve(path);
     if resolved.exists() {
@@ -583,8 +573,7 @@ fn realpath_maybe(path: &str) -> String {
     }
 }
 
-/// `realpathMaybe` but resolving relative to an explicit base dir first
-/// (`realpathMaybe(resolve(configDir, p))` and friends in loadConfig).
+/// Like [`realpath_maybe`] but resolving relative to an explicit base dir first.
 fn realpath_maybe_from(base: &Path, path: &str) -> String {
     let resolved = resolve_from(base, path);
     if resolved.exists() {
@@ -599,13 +588,11 @@ fn path_to_string(p: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// JSON coercion helpers (mirror the TS `String(...)` / `Number(...)` / type
-// guards used throughout loadConfig).
+// JSON coercion helpers (JS `String(...)` / `Number(...)` semantics).
 // ---------------------------------------------------------------------------
 
-/// JS `Number(x)` for the JSON values we feed it (numbers, strings, bool, null).
-/// Only the cases reachable from the config are handled precisely; anything else
-/// becomes `NaN` like JS would.
+/// JS `Number(x)` for the JSON-derived strings we feed it. Only the cases
+/// reachable from the config are handled precisely; anything else becomes `NaN`.
 fn js_number(s: &str) -> f64 {
     let t = s.trim();
     if t.is_empty() {
@@ -614,9 +601,8 @@ fn js_number(s: &str) -> f64 {
     t.parse::<f64>().unwrap_or(f64::NAN)
 }
 
-/// `Number(value)` where `value` arrives as a JSON `Value` (the `?? DEFAULT`
-/// already resolved by the caller). Numbers pass through; strings go through
-/// `js_number`; bool → 0/1; null → 0 (Number(null) === 0).
+/// `Number(value)` over a JSON `Value`. Numbers pass through; strings go through
+/// [`js_number`]; bool → 0/1; null → 0.
 fn js_number_value(v: &Value) -> f64 {
     match v {
         Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
@@ -634,7 +620,7 @@ fn js_number_value(v: &Value) -> f64 {
 }
 
 /// `String(value)` for a JSON value (used for `host`, project `root`, search
-/// roots). Strings pass through verbatim; numbers/bools stringify JS-style.
+/// roots). Strings pass through as-is; numbers/bools stringify JS-style.
 fn js_string_value(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -645,8 +631,8 @@ fn js_string_value(v: &Value) -> String {
     }
 }
 
-/// `asStringArray(value, fallback)` — if `value` isn't an array, clone the
-/// fallback; otherwise keep only the string elements.
+/// If `value` isn't a JSON array, clone the fallback; otherwise keep only its
+/// string elements.
 fn as_string_array(value: Option<&Value>, fallback: &[String]) -> Vec<String> {
     match value {
         Some(Value::Array(arr)) => arr
@@ -662,7 +648,7 @@ fn obj_get<'a>(obj: &'a Value, key: &str) -> Option<&'a Value> {
     obj.as_object().and_then(|m| m.get(key))
 }
 
-/// `typeof v === "string" ? v : undefined`.
+/// `Some(s)` only when the value is a JSON string.
 fn opt_string(v: Option<&Value>) -> Option<String> {
     match v {
         Some(Value::String(s)) => Some(s.clone()),
@@ -671,10 +657,11 @@ fn opt_string(v: Option<&Value>) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// normalizeProjects (config.ts)
+// normalize_projects
 // ---------------------------------------------------------------------------
 
-/// `normalizeProjects(projects, configDir)`.
+/// Normalize the configured `projects` array: keep only objects with a string
+/// `root`, canonicalizing each root against the config dir.
 fn normalize_projects(projects: Option<&Value>, config_dir: &Path) -> Vec<ProjectConfig> {
     let arr = match projects {
         Some(Value::Array(a)) => a,
@@ -682,13 +669,12 @@ fn normalize_projects(projects: Option<&Value>, config_dir: &Path) -> Vec<Projec
     };
     arr.iter()
         .filter(|p| {
-            // Boolean(p) && typeof p === "object" && typeof p.root === "string"
             p.is_object()
                 && matches!(obj_get(p, "root"), Some(Value::String(_)))
         })
         .map(|p| {
             let root_str = match obj_get(p, "root") {
-                Some(v) => js_string_value(v), // String(p.root)
+                Some(v) => js_string_value(v),
                 None => String::new(),
             };
             ProjectConfig {
@@ -705,15 +691,14 @@ fn normalize_projects(projects: Option<&Value>, config_dir: &Path) -> Vec<Projec
 // Permission-profile merge + field selection helpers
 // ---------------------------------------------------------------------------
 
-/// `{ ...DEFAULT_PERMISSION_PROFILES, ...(fromFile.permissionProfiles ?? {}) }`.
-/// A spread *replaces* whole entries by key (it does not deep-merge a profile),
-/// matching the TS object spread precisely.
+/// Merge file-provided profiles over the defaults. A file entry *replaces* a
+/// whole profile by key (no deep-merge of individual fields).
 fn merge_permission_profiles(from_file: Option<&Value>) -> BTreeMap<String, PermissionProfile> {
     let mut merged = default_permission_profiles();
     if let Some(Value::Object(map)) = from_file {
         for (k, v) in map {
-            // Best-effort deserialize a Partial<PermissionProfile>; unknown
-            // shapes degrade to an all-None profile (still a valid override).
+            // Best-effort deserialize; unknown shapes degrade to an all-None
+            // profile (still a valid override).
             let profile: PermissionProfile = serde_json::from_value(v.clone()).unwrap_or_default();
             merged.insert(k.clone(), profile);
         }
@@ -722,10 +707,10 @@ fn merge_permission_profiles(from_file: Option<&Value>) -> BTreeMap<String, Perm
 }
 
 // ---------------------------------------------------------------------------
-// wantsHttp (config.ts)
+// wants_http
 // ---------------------------------------------------------------------------
 
-/// `wantsHttp()` — `--http` present OR `--stdio` absent.
+/// `--http` present OR `--stdio` absent.
 pub fn wants_http() -> bool {
     let args = argv();
     args.iter().any(|a| a == "--http") || !args.iter().any(|a| a == "--stdio")
@@ -765,14 +750,12 @@ fn warn_pathological_root(root: &Path) {
 }
 
 // ---------------------------------------------------------------------------
-// loadConfig (config.ts)
+// load_config
 // ---------------------------------------------------------------------------
 
-/// `loadConfig()` — DEFAULTS < repo-agent.config.json < env < argv.
-///
-/// This is the byte-for-byte port of the TS merge. Where the TS would throw
-/// (e.g. `realpathSync` on a missing `--repo`), we degrade gracefully to the
-/// lexically-resolved path rather than panicking the whole server.
+/// Merge DEFAULTS < repo-agent.config.json < env < argv. Where canonicalization
+/// would fail (e.g. a missing `--repo`), degrade gracefully to the lexically
+/// resolved path rather than panicking the whole server.
 pub fn load_config() -> RepoAgentConfig {
     let args = argv();
 
@@ -785,8 +768,7 @@ pub fn load_config() -> RepoAgentConfig {
                 .unwrap_or_else(|_| ".".to_string())
         });
     let root_resolved = resolve(&root_arg);
-    // TS uses realpathSync directly (no existence guard). We canonicalize when
-    // possible and fall back to the resolved path otherwise.
+    // Canonicalize when possible; fall back to the resolved path otherwise.
     let root = path_to_string(&realpath_existing(&root_resolved));
     let root_path = PathBuf::from(&root);
     // Loud (but non-fatal) startup sanity check: an entire home directory or a
@@ -1043,11 +1025,11 @@ pub fn load_config() -> RepoAgentConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Small merge/coercion helpers used only by loadConfig.
+// Small merge/coercion helpers used only by load_config.
 // ---------------------------------------------------------------------------
 
-/// `process.env.X` with JS `??` (nullish) semantics: an env var that is unset
-/// is `undefined`; a set-but-empty var is the empty string and is *kept*.
+/// Env var with `??` (nullish) semantics: an unset var is `None`; a set-but-empty
+/// var is the empty string and is *kept*.
 fn env_var_present(key: &str) -> Option<String> {
     std::env::var(key).ok()
 }
@@ -1069,9 +1051,9 @@ fn nullish_opt(value: Option<&Value>) -> Option<&Value> {
     }
 }
 
-/// JS `||` over a JSON value treated as a candidate string: a present, truthy
-/// (non-empty) string yields `Some`, everything else (missing/null/empty/non
-/// -string) falls through.
+/// `||` over a JSON value treated as a candidate string: a present, non-empty
+/// string yields `Some`; everything else (missing/null/empty/non-string) falls
+/// through.
 fn truthy_string(value: Option<&Value>) -> Option<String> {
     match value {
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
@@ -1079,8 +1061,7 @@ fn truthy_string(value: Option<&Value>) -> Option<String> {
     }
 }
 
-/// Plain spread of a boolean field: `fromFile.x` if it is a JSON bool, else the
-/// default. (The TS spreads the raw value; configs always supply booleans here.)
+/// A boolean field from the file if it is a JSON bool, else the default.
 fn bool_or(value: Option<&Value>, default: bool) -> bool {
     match value {
         Some(Value::Bool(b)) => *b,
@@ -1088,9 +1069,8 @@ fn bool_or(value: Option<&Value>, default: bool) -> bool {
     }
 }
 
-/// Plain spread of an integer scalar (`Number`-free path: these DEFAULTS fields
-/// are not wrapped in `Number(...)`, so a file override passes through as-is
-/// when it is a JSON number; otherwise the default stands).
+/// An integer scalar: a file override passes through when it is a JSON number;
+/// otherwise the default stands.
 fn int_or(value: Option<&Value>, default: i64) -> i64 {
     match value {
         Some(Value::Number(n)) => n
@@ -1109,8 +1089,7 @@ fn enum_pick<T: for<'de> Deserialize<'de>>(value: Option<&Value>) -> Option<T> {
     }
 }
 
-/// De-duplicate while preserving first-seen order (the `[...new Set(...)]` idiom
-/// over `projectSearchRoots`).
+/// De-duplicate while preserving first-seen order (used over `projectSearchRoots`).
 fn dedup_preserve_order(items: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(items.len());
@@ -1122,8 +1101,7 @@ fn dedup_preserve_order(items: Vec<String>) -> Vec<String> {
     out
 }
 
-/// `{ ...DEFAULTS.autoCompact, ...(fromFile.autoCompact ?? {}) }` — per-field
-/// shallow override of the default AutoCompact tuning.
+/// Per-field shallow override of the default AutoCompact tuning.
 fn merge_auto_compact(value: Option<&Value>) -> AutoCompactConfig {
     let mut cfg = default_auto_compact();
     if let Some(Value::Object(map)) = value {
@@ -1150,8 +1128,7 @@ fn merge_auto_compact(value: Option<&Value>) -> AutoCompactConfig {
     cfg
 }
 
-/// `DEFAULT_PERMISSION_PROFILES.auto.commandAllowPrefixes` — the DEFAULTS fall
-/// back to the auto profile's allow list.
+/// The `auto` profile's command allow list (the DEFAULTS fallback).
 fn default_auto_allow_prefixes() -> Vec<String> {
     default_permission_profiles()
         .get("auto")
@@ -1159,7 +1136,7 @@ fn default_auto_allow_prefixes() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `DEFAULT_PERMISSION_PROFILES.auto.commandPromptPrefixes`.
+/// The `auto` profile's command prompt list (the DEFAULTS fallback).
 fn default_auto_prompt_prefixes() -> Vec<String> {
     default_permission_profiles()
         .get("auto")

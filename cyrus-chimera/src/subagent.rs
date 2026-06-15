@@ -1,8 +1,6 @@
 //! The four MAIN-thread subagent MCP tools the ChatGPT MAIN thread calls to
 //! delegate scoped subtasks to parallel ChatGPT subagents.
 //!
-//! Source: repo-agent-mcp/src/tools/subagent.ts (private original)
-//!
 //! Scope note: the durable `SubagentRegistry` itself (createJob/collectResult/
 //! findByTask/…) lives inside `store.ts` and is already ported into
 //! `crate::state` (`SubagentRegistry` + `RepoState`). This module is the port of

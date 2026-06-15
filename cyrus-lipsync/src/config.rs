@@ -1,30 +1,23 @@
 //! ShadowConfig — CDP target, repo-agent server URL, loop tuning, model/effort
 //! axes, subagent caps, and the injected preambles.
 //!
-//! Source: idare/shadow/config.py (private original)
-//!         (the `ShadowConfig` dataclass + `from_env`)
+//! A plain data carrier: it holds defaults and reads the documented env vars in
+//! `from_env`; it does NOT normalize anything.
 //!
-//! This is a plain data carrier — a faithful port of the Python dataclass. It
-//! holds defaults and reads the documented env vars in `from_env`; it does NOT
-//! normalize anything.
-//!
-//! Hazards (kept verbatim from the source):
+//! Invariants:
 //!   - `model_slug` accepts BOTH a raw slug AND a friendly spec ("5.5 thinking",
-//!     "5.5/pro"); the normalization lives in the conductor (chat.py in the
-//!     original), NOT here. Config stays a dumb carrier.
+//!     "5.5/pro"); the normalization lives in the conductor, NOT here. Config
+//!     stays a dumb carrier.
 //!   - The preamble strings are load-bearing — the connector-load instruction,
 //!     the "empty result == success" / autonomy posture, and the AGENT_STATUS
-//!     sentinel contract make chatgpt.com behave. They are copied byte-for-byte
-//!     from the Python; do not paraphrase or reflow them.
-//!   - `subagent_preamble` carries a literal `{agent_id}` placeholder. The Python
-//!     fills it via `str.format(agent_id=...)`; the conductor does the
-//!     substitution here. The stored text keeps the literal `{agent_id}`.
+//!     sentinel contract make chatgpt.com behave. Do not paraphrase or reflow
+//!     them.
+//!   - `subagent_preamble` carries a literal `{agent_id}` placeholder; the
+//!     conductor substitutes it. The stored text keeps the literal `{agent_id}`.
 
 use std::env;
 
-/// Configuration for the ChatGPT shadow harness (the "slavemaster").
-///
-/// Mirrors `ShadowConfig` in config.py field-for-field, including defaults.
+/// Configuration for the ChatGPT shadow harness.
 #[derive(Debug, Clone)]
 pub struct ShadowConfig {
     // CDP target (the puppeted ChatGPT tab)
@@ -67,7 +60,7 @@ pub struct ShadowConfig {
 
     // Model and reasoning effort are TWO independent axes on chatgpt.com, both
     // carried in the /backend-api/f/conversation turn body and forced via a
-    // fetch-wrapper (see chat.py):
+    // fetch-wrapper:
     //   model_slug      -> the lane: gpt-5-5 (auto) / -instant / -thinking / -pro.
     //                      Accepts a slug or friendly spec ("5.5 thinking", "5.5/pro").
     //   thinking_effort -> reasoning depth for thinking-lane models:
@@ -104,9 +97,8 @@ pub struct ShadowConfig {
 
 /// Subagent preamble — injected at the top of each spawned subagent conversation.
 ///
-/// Copied verbatim from `ShadowConfig.subagent_preamble` in config.py. The
-/// `{agent_id}` token is a literal placeholder filled by the conductor (the
-/// Python used `str.format(agent_id=...)`).
+/// Load-bearing; do not reflow. The `{agent_id}` token is a literal placeholder
+/// filled by the conductor.
 pub const SUBAGENT_PREAMBLE: &str = concat!(
     "SETUP — you are subagent \"{agent_id}\" working in parallel under a main agent.\n",
     "FIRST ACTION (required): call repo_status once before anything else, so the system can ",
@@ -124,9 +116,8 @@ pub const SUBAGENT_PREAMBLE: &str = concat!(
 /// Main conversation preamble — injected once at the start of each ChatGPT
 /// conversation.
 ///
-/// Copied verbatim from `ShadowConfig.preamble` in config.py. Load-bearing: the
-/// connector-load instruction, the autonomy posture, and the AGENT_STATUS
-/// sentinel contract are what make the page behave.
+/// Load-bearing; do not reflow: the connector-load instruction, the autonomy
+/// posture, and the AGENT_STATUS sentinel contract are what make the page behave.
 pub const PREAMBLE: &str = concat!(
     "SETUP (read once, then do the task):\n",
     "You are a coding agent driving a real repository through the **repo-agent** MCP connector.\n",
@@ -146,7 +137,7 @@ pub const PREAMBLE: &str = concat!(
 );
 
 /// Default `continue_variants` — varied nudge phrasings so the cadence reads less
-/// like a metronome. Mirrors the Python tuple default verbatim and in order.
+/// like a metronome.
 const CONTINUE_VARIANTS: &[&str] = &[
     "continue",
     "go on",
@@ -157,7 +148,6 @@ const CONTINUE_VARIANTS: &[&str] = &[
 ];
 
 impl Default for ShadowConfig {
-    /// Mirrors the dataclass field defaults in `ShadowConfig`.
     fn default() -> Self {
         Self {
             cdp_host: "127.0.0.1".to_string(),
@@ -203,18 +193,15 @@ impl Default for ShadowConfig {
 impl ShadowConfig {
     /// Build a config from the process environment.
     ///
-    /// Mirrors `ShadowConfig.from_env` in config.py: it overrides only the
-    /// documented subset of fields; everything else keeps its dataclass default.
+    /// Overrides only the documented subset of fields; everything else keeps its
+    /// default.
     ///
-    /// Parsing notes (preserved from the Python):
-    ///   - Numeric vars use the same string defaults the Python passed to
-    ///     `int(...)` / `float(...)`. A malformed value would raise in Python; we
-    ///     fall back to the documented default instead of panicking, which is the
-    ///     closest safe equivalent for a config carrier.
-    ///   - `AUTO_APPROVE` is true unless the value is exactly "0" (`!= "0"`),
-    ///     matching the Python's `os.environ.get("AUTO_APPROVE", "1") != "0"`.
-    ///   - The `*_BEARER` / `SHADOW_*` model/effort vars use the Python
-    ///     `os.environ.get(...) or None` idiom: an unset OR empty value => None.
+    /// Parsing notes:
+    ///   - A malformed numeric value falls back to the documented default rather
+    ///     than panicking — the safe equivalent for a config carrier.
+    ///   - `AUTO_APPROVE` is true unless the value is exactly "0".
+    ///   - The `*_BEARER` / `SHADOW_*` model/effort vars treat an unset OR
+    ///     empty value as None.
     pub fn from_env() -> Self {
         let d = Self::default();
 
@@ -237,15 +224,14 @@ impl ShadowConfig {
             subagent_thinking_effort: env_or_none("SHADOW_SUBAGENT_EFFORT"),
             max_subagents: parse_or(env::var("MAX_SUBAGENTS").ok().as_deref(), 2),
 
-            // Fields not read by from_env keep their dataclass defaults.
+            // Fields not read by from_env keep their defaults.
             ..d
         }
     }
 }
 
 /// Parse an optional env string into `T`, falling back to `default` when unset,
-/// empty, or unparseable. Mirrors the Python defaulting (an absent var uses the
-/// documented default string passed to `int`/`float`).
+/// empty, or unparseable.
 fn parse_or<T: std::str::FromStr>(value: Option<&str>, default: T) -> T {
     match value {
         Some(s) => s.trim().parse().unwrap_or(default),

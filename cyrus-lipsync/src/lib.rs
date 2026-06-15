@@ -1,7 +1,4 @@
-//! cyrus-lipsync — Rust port of the lipsync (idare/shadow) responses-shim harness.
-//!
-//! Original: idare/shadow (private original)
-//!           (crate root mirrors `responses_shim.py`'s module docstring)
+//! cyrus-lipsync — the lipsync responses-shim harness.
 //!
 //! # What this is
 //!
@@ -14,8 +11,7 @@
 //! WebSocket frames, reconstruct the answer tokens from ChatGPT's "v1" JSON-patch
 //! delta encoding, and re-emit them as codex-shaped Responses SSE events.
 //!
-//! The whole point is to reuse 100% of the shadow's hard parts and keep this layer
-//! a pure translation between two streaming dialects:
+//! This layer is a thin translation between two streaming dialects:
 //!   - [`tab_factory`] — a fresh tab has no service worker, so the turn streams
 //!     inline through the `/f/conversation` SSE body (no CDP-invisible shared
 //!     worker), plus the arm-before-navigate helper.
@@ -44,10 +40,10 @@
 //! - The request body is uncompressed for a non-"OpenAI" provider with no chatgpt
 //!   auth (codex only zstd-compresses when `provider.is_openai()` AND chatgpt auth
 //!   is present), so we parse plain JSON.
-//! - These wire shapes are reverse-engineered: the v1delta decoding, the wstap
-//!   frame handling, the `FETCH_WRAPPER` injection string, and the SSE event shapes
-//!   must match the original byte-for-byte. The authoritative codex-rs references
-//!   are codex-api/src/sse/responses.rs and protocol/src/models.rs (`ResponseItem`,
+//! - These wire shapes are reverse-engineered and fragile: the v1delta decoding,
+//!   the wstap frame handling, the `FETCH_WRAPPER` injection string, and the SSE
+//!   event shapes must match exactly. The authoritative codex-rs references are
+//!   codex-api/src/sse/responses.rs and protocol/src/models.rs (`ResponseItem`,
 //!   `#[serde(tag="type", rename_all="snake_case")]`).
 //!
 //! # Tools (ReAct text bridge)
@@ -69,9 +65,6 @@
 //! (the shim's [`tab_factory`]) but each opens its OWN page socket, so two threads'
 //! token streams cannot cross-talk. [`provider`] is the single-tab driver used by
 //! the pre-conductor path.
-//!
-//! This crate root declares one module per logical area; each module currently
-//! holds a compiling stub that documents its port plan.
 
 pub mod cli;
 pub mod config;
@@ -87,10 +80,9 @@ pub mod runtime;
 
 /// Crate-wide error type shared by every lipsync module.
 ///
-/// Mirrors the failure surface of `responses_shim.py`: config resolution, the CDP
-/// transport, plain JSON parsing of codex's uncompressed request body, and I/O.
-/// `Other` carries an `anyhow::Error` so module internals can bubble up ad-hoc
-/// context without a bespoke variant.
+/// Covers config resolution, the CDP transport, plain JSON parsing of codex's
+/// uncompressed request body, and I/O. `Other` carries an `anyhow::Error` so
+/// module internals can bubble up ad-hoc context without a bespoke variant.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("config error: {0}")]

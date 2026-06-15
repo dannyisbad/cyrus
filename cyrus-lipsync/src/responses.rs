@@ -2,12 +2,6 @@
 //! the ReAct tool bridge (parse ChatGPT's ```run fences into codex function_call
 //! items, flatten function_call_output back to text).
 //!
-//! Source: idare/shadow/responses_shim.py (private original)
-//!         (build_app, _sse, _message_item, _completed, _custom_tool_call_item,
-//!          _function_call_item, build_tool_preamble, parse_tool_call,
-//!          _payload_text, extract_prompt, _content_text, last_tool_output,
-//!          ShadowResponsesShim/build_app HTTP surface)
-//!
 //! The codex-facing SSE frame shapes MUST match codex-rs exactly. The
 //! authoritative reference is:
 //!   - codex-rs/codex-api/src/sse/responses.rs  (ResponsesStreamEvent + the
@@ -27,7 +21,7 @@
 //!   function_call items: {"type":"function_call","name","arguments":<JSON STRING>,"call_id"}
 //!   freeform tools:      {"type":"custom_tool_call","call_id","name","input":<raw text>}
 //!
-//! Hazards (verified against the Python comments — fidelity is everything):
+//! Hazards:
 //!   - An output_text.delta with NO active item makes codex's aggregator panic —
 //!     ALWAYS emit output_item.added (content:[]) to OPEN the item before deltas,
 //!     then output_item.done to close it.

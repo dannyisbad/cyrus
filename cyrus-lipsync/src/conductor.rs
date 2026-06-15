@@ -3,46 +3,20 @@
 //! so the main thread and each native subagent thread render natively in codex's
 //! TUI without token cross-talk.
 //!
-//! Source: idare/shadow/responses_shim.py (private original)
-//!         (class ThreadConductor, ~line 430; the merged per-turn event stream
-//!          and run_turn/run_turn_conductor; build_conductor_preamble /
-//!          CONDUCTOR_PREAMBLE / CONDUCTOR_BRIDGE / CONDUCTOR_TASK_SEP /
-//!          THREAD_BIND_DIRECTIVE; extract_cwd / project_name_for_cwd)
+//! [`ChatSurface`] (the page-driving surface) and [`ConductorShim`] (the router
+//! callbacks) are traits so this file compiles standalone; the page layer and
+//! router supply the concrete impls.
 //!
-//! This module is a faithful port of the `ThreadConductor` class and the
-//! conductor-specific free functions. The SSE-emission primitives, request
-//! parsing, ReAct fence parsing, and tool preamble live in [`crate::responses`]
-//! and are reused verbatim (so the codex-facing wire shapes stay byte-for-byte
-//! identical between the two paths).
-//!
-//! ## Scaffold-imposed seams (do NOT change without re-reading the brief)
-//!
-//! Two collaborators the Python conductor uses have NO concrete type in this
-//! scaffold yet: chat.py's `ChatSurface` (the page-driving surface) and the
-//! router's `ShadowResponsesShim` (the conductor here can't import responses.rs's
-//! thin `ShadowResponsesShim`, which is a different, translation-only struct).
-//! Rather than invent concrete types in a file that must compile standalone, this
-//! module defines the exact behavioural contracts it depends on as traits:
-//!   - [`ChatSurface`] — the chat.py surface (inject/state/approve/stop/overrides/
-//!     project/slug/conversation-id), implemented later by the page layer.
-//!   - [`ConductorShim`] — the router callbacks the conductor invokes
-//!     (`main_thread_id`, `resolve_project`, `seed_binds_once`, `enqueue_bind`,
-//!     and tab bring-up), implemented later by the real router.
-//! The conductor's logic, ordering, and moderation-recovery state machine are a
-//! 1:1 port; only the *interface* to those two stubs is expressed as a trait.
-//!
-//! Hazards (carried from the Python, fidelity is everything):
-//!   - Each conductor MUST open its OWN page socket (one tab = one CdpClient =
-//!     one WsTap); sharing a socket reintroduces cross-talk between threads.
-//!   - Re-delivering a withheld tool result must NEVER re-execute a mutation
-//!     (double-apply). The result is cached against the call signature and only
-//!     the cached value is replayed.
-//!     An identical re-call is re-delivered from cache THROUGH THE TOOL RESPONSE
-//!     (firmer wording past `loop_repeat_threshold`, default 4) — never by
-//!     interrupting generation, so the model stays in its turn instead of being
-//!     derailed into a summary. A repo mutation (apply_patch/repo_write/repo_edit)
-//!     clears the cache so an edit -> rebuild is NOT mistaken for a loop, and
-//!     `update_plan` is exempt entirely (revising a TODO is not a stuck-loop signal).
+//! Two load-bearing invariants:
+//!   - Each conductor opens its OWN page socket (one tab = one CdpClient = one
+//!     WsTap). A shared socket reintroduces cross-thread token cross-talk.
+//!   - Re-delivering a withheld tool result must never re-execute a mutation.
+//!     The result is cached against the call signature and the cached value is
+//!     replayed through the tool response — never by interrupting generation,
+//!     which would derail the model into a summary. A repo mutation
+//!     (apply_patch/repo_write/repo_edit) clears the cache so edit→rebuild isn't
+//!     read as a loop; `update_plan` is exempt. Firmer wording past
+//!     `loop_repeat_threshold` (default 4).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,8 +45,7 @@ use crate::responses::{build_tool_preamble, TurnDriver};
 // The text injected once per ChatGPT thread, ahead of the first user task. These
 // strings are load-bearing (the connector-load instruction, the "empty result ==
 // success" posture, the apply_patch/shell_command/update_plan tool names, and the
-// PowerShell guards are what make chatgpt.com behave). Copied byte-for-byte from
-// the Python; do NOT paraphrase or reflow.
+// PowerShell guards are what make chatgpt.com behave) — do NOT paraphrase or reflow.
 
 /// `CONDUCTOR_PREAMBLE` — the short hand-rolled fallback (used only when
 /// `SHIM_FORWARD_CODEX_PROMPT=0`, kept for A/B and as a safety net).
@@ -678,7 +651,7 @@ impl ThreadConductor {
         }
     }
 
-    /// The current thread id (the Python attribute `thread_id`).
+    /// The current thread id.
     /// Poison-proof: a panic elsewhere under this lock must not take every
     /// thread's routing down with it — the plain String inside stays valid.
     pub fn thread_id(&self) -> String {
@@ -1335,7 +1308,7 @@ final answer with no tool block if the task is complete.",
     /// Spawned as a background task; takes ownership of the WS receiver, the events
     /// sender, the turn-done sender, and shared turn_text state.
     /// On turn end it restores the WS receiver into the shared `ws_rx` slot so the
-    /// next turn can re-wire it (the Python kept the single `_q`).
+    /// next turn can re-wire it.
     fn spawn_ws_watcher(
         &self,
         mut ws_rx: mpsc::UnboundedReceiver<(String, String)>,
@@ -1458,23 +1431,12 @@ final answer with no tool block if the task is complete.",
             .ok_or_else(|| anyhow::anyhow!("no events queue"))?;
         let mut turn_done_rx = self.turn_done_rx.lock().await.take();
 
-        // Model- AND effort-aware: a hidden-reasoning model (Pro/o-series) OR a
-        // high reasoning effort means long silent thinks between tool calls are
-        // expected, so widen the budget rather than abort a healthy turn.
-        let stall = {
-            let model = self.applied_model.lock().await.clone();
-            let effort = self.applied_effort.lock().await.clone();
-            Duration::from_secs(stall_budget_secs(model.as_deref(), effort.as_deref()))
-        };
-        // Watchdog cadence: every `poll`, if there's been no tap activity we ASK
-        // the page whether ChatGPT is still generating, accumulating silent time
-        // toward the full `stall` budget. This distinguishes the two silences a
-        // single timer can't: (a) the turn actually ENDED but the tap missed the
-        // completion — a long, tool-heavy turn hands its stream off to the
-        // shared-worker socket CDP can't see, so the final answer + turn_complete
-        // arrive invisibly — vs (b) ChatGPT is genuinely stuck mid-generation
-        // (rate-limit). (a) closes the turn cleanly; only (b) aborts.
-        let poll = Duration::from_secs(15).min(stall);
+        // No wall clock: runs while the page reports it's generating.
+        // Opt-in SHIM_TURN_STALL_SECS caps silence.
+        let stall =
+            explicit_stall_secs(std::env::var("SHIM_TURN_STALL_SECS").ok().as_deref())
+                .map(Duration::from_secs);
+        let poll = Duration::from_secs(15);
         let mut silent = Duration::ZERO;
         let result: anyhow::Result<()> = async {
             loop {
@@ -1604,26 +1566,19 @@ final answer with no tool block if the task is complete.",
                             return Ok(());
                         }
                         silent += poll;
-                        if silent < stall {
-                            continue; // still generating (or unreadable) — keep waiting
+                        match stall {
+                            Some(cap) if silent >= cap => {
+                                self.abort_server_tail().await;
+                                if let Some(chat) = self.chat.lock().await.clone() {
+                                    let _ = chat.stop().await;
+                                }
+                                return Err(anyhow::anyhow!(
+                                    "no ChatGPT output for {}s (SHIM_TURN_STALL_SECS) — turn aborted, retry shortly",
+                                    silent.as_secs()
+                                ));
+                            }
+                            _ => continue,
                         }
-                        // Silent for the FULL budget while still generating: a real
-                        // mid-turn stall (rate-limit / dead). Abort with the retryable
-                        // error and stop the stuck generation.
-                        tracing::warn!(
-                            "[shim] thread={} turn stalled: no ChatGPT output for {}s (still generating, no token stream or connector-tool activity) — aborting turn",
-                            self.thread_id(),
-                            silent.as_secs(),
-                        );
-                        self.abort_server_tail().await;
-                        if let Some(chat) = self.chat.lock().await.clone() {
-                            let _ = chat.stop().await;
-                        }
-                        return Err(anyhow::anyhow!(
-                            "ChatGPT produced no output for {}s (no token stream and no \
-connector-tool activity) — likely rate-limited or stalled; turn aborted, retry shortly",
-                            silent.as_secs()
-                        ));
                     }
                 }
             }
@@ -1941,7 +1896,7 @@ connector-tool activity) — likely rate-limited or stalled; turn aborted, retry
 
     /// `/control/turn_complete`: ChatGPT finished its turn with final text — end the
     /// codex turn by resolving the turn-done future. Returns true if a turn was
-    /// active (the Python's `{"ok": true}` vs the 409 `{"ok": false}`).
+    /// active.
     pub async fn control_turn_complete(&self, text: &str) -> bool {
         if let Some(td) = self.turn_done_tx.lock().await.take() {
             let _ = td.send(text.to_string());
@@ -2028,54 +1983,6 @@ impl TurnDriver for ThreadConductor {
 /// users can pin a precise budget.
 fn explicit_stall_secs(raw: Option<&str>) -> Option<u64> {
     raw.and_then(|v| v.trim().parse::<u64>().ok()).filter(|n| *n > 0)
-}
-
-/// ChatGPT models whose reasoning runs SERVER-SIDE and streams nothing visible
-/// for minutes (the Pro lanes, the o-series): they routinely sit silent well
-/// past the token-streaming watchdog's base budget before the first token. The
-/// stall watchdog can't tell that silence from a dead/rate-limited turn, so for
-/// these we floor the budget generously (a true rate-limit still surfaces
-/// instantly as a typed stream error, not as silence). `gpt-5-5-thinking` /
-/// `-instant` stream tokens promptly and keep the tight base.
-fn is_hidden_reasoning_model(slug: &str) -> bool {
-    let s = slug.to_ascii_lowercase();
-    s.contains("pro")
-        || s.starts_with("o1")
-        || s.starts_with("o3")
-        || s.starts_with("o4")
-        || s.starts_with("gpt-o")
-}
-
-/// The stall budget for THIS turn: the base [`turn_stall_secs`], widened to a
-/// 10-minute floor when a long silent think is EXPECTED — a hidden-reasoning
-/// model (Pro/o-series) OR a high reasoning effort (extended/max). In an
-/// agentic turn the model reasons silently between connector-tool calls (no
-/// token stream, no chimera activity); at extended effort that gap routinely
-/// blows past the base 90s while the model works out a non-trivial edit, so the
-/// tight base would abort a perfectly healthy turn mid-think and force codex
-/// into a stall-retry loop. A genuine rate-limit still surfaces INSTANTLY as a
-/// typed stream error (handled separately), not as silence, so the generous
-/// floor costs nothing there. An explicit larger `SHIM_TURN_STALL_SECS` still
-/// wins. This stall budget is a SILENCE backstop (no token AND no connector-tool
-/// activity), NOT a cap on how long real work may take — there is no per-turn or
-/// per-session wall clock; a turn runs as long as it keeps making progress.
-fn stall_budget_secs(model: Option<&str>, effort: Option<&str>) -> u64 {
-    // An explicit env override wins exactly (no floor applied).
-    explicit_stall_secs(std::env::var("SHIM_TURN_STALL_SECS").ok().as_deref())
-        .unwrap_or_else(|| default_stall_budget(model, effort))
-}
-
-/// The default budget (no explicit override): 90s, floored to 600s when a long
-/// silent think is expected. Pure (no env) so it's testable without racing the
-/// process-global `SHIM_TURN_STALL_SECS` other tests mutate.
-fn default_stall_budget(model: Option<&str>, effort: Option<&str>) -> u64 {
-    let long_think = model.map(is_hidden_reasoning_model).unwrap_or(false)
-        || matches!(effort, Some("extended") | Some("max"));
-    if long_think {
-        600
-    } else {
-        90
-    }
 }
 
 /// Send one SSE frame on the streaming-body channel (`_sse` analogue). A closed
@@ -2348,30 +2255,6 @@ mod tests {
         assert_eq!(explicit_stall_secs(Some("bogus")), None); // junk
         assert_eq!(explicit_stall_secs(Some(" 45 ")), Some(45)); // trimmed, honoured
         assert_eq!(explicit_stall_secs(Some("120")), Some(120));
-    }
-
-    #[test]
-    fn hidden_reasoning_models_get_a_generous_stall_floor() {
-        // token-streaming lanes keep the tight base (no env -> 90)
-        assert!(!is_hidden_reasoning_model("gpt-5-5-thinking"));
-        assert!(!is_hidden_reasoning_model("gpt-5-5-instant"));
-        assert!(!is_hidden_reasoning_model("gpt-5-5"));
-        // default_stall_budget is pure (no env) so it can't race the stall tests.
-        // fast model + low/standard effort keeps the tight base
-        assert_eq!(default_stall_budget(Some("gpt-5-5-thinking"), Some("standard")), 90);
-        assert_eq!(default_stall_budget(Some("gpt-5-5-instant"), Some("min")), 90);
-        assert_eq!(default_stall_budget(None, None), 90);
-        // Pro + o-series reason silently server-side -> floored to >=600
-        assert!(is_hidden_reasoning_model("gpt-5-5-pro"));
-        assert!(is_hidden_reasoning_model("gpt-5-4-pro"));
-        assert!(is_hidden_reasoning_model("o3-pro"));
-        assert!(is_hidden_reasoning_model("o1"));
-        assert_eq!(default_stall_budget(Some("gpt-5-5-pro"), Some("standard")), 600);
-        assert_eq!(default_stall_budget(Some("o3-pro"), None), 600);
-        // high reasoning effort floors ANY model (long agentic thinks between
-        // tool calls) — this is the common cyrus case (launch effort=high).
-        assert_eq!(default_stall_budget(Some("gpt-5-5-thinking"), Some("extended")), 600);
-        assert_eq!(default_stall_budget(Some("gpt-5-5-thinking"), Some("max")), 600);
     }
 
     #[test]

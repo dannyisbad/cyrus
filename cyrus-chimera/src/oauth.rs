@@ -1,16 +1,11 @@
 //! OAuth 2.0 / OIDC authorization server for the MCP connector.
 //!
-//! Source: repo-agent-mcp/src/oauth.ts (private original)
+//! HS256 JWTs (HMAC-SHA256 over base64url `header.body`), PKCE S256, a
+//! redirect_uri allowlist, the lenient "both ChatGPT hosts" token-endpoint
+//! match, the cyrus consent pre-authorization one-time nonce (`arm_consent`),
+//! and per-response security headers.
 //!
-//! This is a faithful port of the hand-rolled TypeScript OAuth/OIDC server. The
-//! HS256 JWTs are produced byte-for-byte the way the Node version produces them
-//! (`createHmac("sha256")` + base64url over `header.body`), so tokens issued by
-//! either implementation cross-validate. PKCE S256, the redirect_uri allowlist,
-//! the lenient "both ChatGPT hosts" token-endpoint match, the cyrus consent
-//! pre-authorization one-time nonce (`arm_consent`), and the per-response
-//! security headers are all preserved.
-//!
-//! Hazards preserved from the original:
+//! Hazards:
 //!   - Constant-time compare on the password/secret and on the JWT signature
 //!     (here via `subtle`-style byte compare + `hmac`'s `verify_slice`).
 //!   - `is_valid_redirect_uri` allowlist (chatgpt.com / openai.com /
@@ -437,7 +432,7 @@ impl std::fmt::Debug for OAuth {
 impl OAuth {
     /// `createOAuthHandlers(config)`. `signing_key` falls back to `secret` when
     /// `None`/empty, matching `config.signingKey || secret`. `repo_root` is the
-    /// directory shown on the consent page (the TS original hardcoded it).
+    /// directory shown on the consent page.
     pub fn new(
         base_url: impl Into<String>,
         secret: impl Into<String>,

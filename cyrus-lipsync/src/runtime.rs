@@ -1,34 +1,25 @@
-//! ShimRuntime + ConductorMux — the ASSEMBLED live runtime behind the
+//! ShimRuntime + ConductorMux — the assembled live runtime behind the
 //! `/v1/responses` shim: the shared TabFactory rail, the per-thread
 //! `ThreadConductor` router, the chimera model-free bind queue, and the
 //! per-folder ChatGPT Project cache.
 //!
-//! Source: idare/shadow/responses_shim.py (private original)
-//!         (class ShadowResponsesShim: tabs/_ensure_tabs, _threads/get_conductor,
-//!          _main_thread_id, _eager_main + boot(), conductor_for_control /
-//!          await_control_conductor, _chimera_get/_chimera_post,
-//!          _seed_binds_once / enqueue_bind / _bind_watcher, resolve_project +
-//!          the file-backed project cache, the `/control/*` handler bodies, and
-//!          the `_booted` health aggregate)
-//!
-//! The Python folds the HTTP router and the runtime into ONE class. The port
-//! splits them along the seams the ported modules already drew:
+//! The pieces split along these seams:
 //!   - [`ShimRuntime`] implements the conductor-facing [`ConductorShim`] trait
 //!     (tab bring-up, page-socket opening, bind rail, project resolution) plus
-//!     the sync [`MainRegistry`] half of the `_main_thread_id` bookkeeping.
+//!     the sync [`MainRegistry`] half of the main-thread bookkeeping.
 //!   - [`ConductorMux`] implements [`TurnDriver`] for `responses::build_app`,
-//!     owning the `thread-id -> ThreadConductor` map (`get_conductor`), the
-//!     eager-main adoption, and the `/control/*` routing.
-//!   - [`PageSurface`] adapts the concrete `provider::ChatSurface` (chat.py's
-//!     DOM driving) + this tab's own `CdpClient`/`WsTap` to the conductor's
-//!     `ChatSurface` trait — one adapter per tab, so per-thread WS isolation is
-//!     preserved (one tab = one page socket = one tap).
+//!     owning the `thread-id -> ThreadConductor` map, the eager-main adoption,
+//!     and the `/control/*` routing.
+//!   - [`PageSurface`] adapts the concrete `provider::ChatSurface` + this tab's
+//!     own `CdpClient`/`WsTap` to the conductor's `ChatSurface` trait — one
+//!     adapter per tab, so per-thread WS isolation is preserved (one tab = one
+//!     page socket = one tap).
 //!
-//! Hazards carried from the Python:
-//!   - `open_page` must arm BEFORE navigating (tab_factory.arm_and_navigate with
-//!     FETCH_WRAPPER_JS) so ChatGPT's opening burst is never missed, and each
-//!     conductor gets its OWN page socket.
-//!   - `_seed_binds_once` must claim pre-existing unbound chimera sessions for
+//! Hazards:
+//!   - `open_page` must arm BEFORE navigating (with FETCH_WRAPPER_JS) so
+//!     ChatGPT's opening burst is never missed, and each conductor gets its OWN
+//!     page socket.
+//!   - `seed_binds_once` must claim pre-existing unbound chimera sessions for
 //!     "main" BEFORE the first subagent tab opens, or elimination binding can
 //!     hand the long-lived main session to a subagent.
 //!   - A repeated `/control/toolcall` signature is re-delivered from cache and
@@ -62,23 +53,21 @@ use crate::wstap::WsTap;
 
 // ===== the page-surface adapter ==============================================
 
-/// One booted tab's page surface: the concrete chat.py port
-/// (`provider::ChatSurface`) + this tab's own CDP socket + WS tap, adapted to
-/// the conductor's [`ChatSurface`] trait.
+/// One booted tab's page surface: the concrete `provider::ChatSurface` + this
+/// tab's own CDP socket + WS tap, adapted to the conductor's [`ChatSurface`]
+/// trait.
 struct PageSurface {
     cdp: Arc<CdpClient>,
     chat: provider::ChatSurface,
-    /// Kept alive for the tab's lifetime; `reset()` per inject (the conductor
-    /// port's contract: "the page layer's tap.reset() is invoked by the page
-    /// surface on inject", mirroring the Python's per-turn `self.tap.reset()`).
+    /// Kept alive for the tab's lifetime; the page surface calls `reset()` on
+    /// each inject for fresh per-turn parser state.
     tap: WsTap,
 }
 
 #[async_trait]
 impl ChatSurface for PageSurface {
     async fn inject(&self, text: &str) -> anyhow::Result<()> {
-        // Fresh parser state for the new turn (Python: `self.tap.reset()` right
-        // before `chat.inject`), then paste + send.
+        // Fresh parser state for the new turn, then paste + send.
         self.tap.reset();
         self.chat.inject(text).await
     }
@@ -97,8 +86,8 @@ impl ChatSurface for PageSurface {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        // chat.py's stop returns a bool ("stably stopped"); the conductor only
-        // needs best-effort interruption, so the bool is dropped here.
+        // stop returns a bool ("stably stopped"); the conductor only needs
+        // best-effort interruption, so the bool is dropped here.
         let _ = self.chat.stop().await;
         Ok(())
     }
@@ -107,12 +96,12 @@ impl ChatSurface for PageSurface {
         Ok(self.chat.resolve_slug(Some(model)).await)
     }
 
-    /// chat.py `set_overrides` WITH the gizmo/no_history axes (the provider
-    /// port's narrower `set_overrides(model, effort)` lacks them, so the adapter
-    /// ports the full version against the same `__shadow_overrides` contract).
+    /// `set_overrides` with the gizmo/no_history axes (the provider's narrower
+    /// `set_overrides(model, effort)` lacks them), against the same
+    /// `__shadow_overrides` localStorage contract the fetch-wrapper reads.
     async fn set_overrides(&self, ov: ChatOverrides) -> anyhow::Result<()> {
         let mut map = serde_json::Map::new();
-        // Python: `slug = await self.resolve_slug(model) if model else None`.
+        // Resolve the model to a slug only when one was requested.
         if let Some(m) = ov.model.as_deref().filter(|m| !m.is_empty()) {
             if let Some(slug) = self.chat.resolve_slug(Some(m)).await {
                 map.insert("model".to_string(), Value::String(slug));
@@ -121,7 +110,7 @@ impl ChatSurface for PageSurface {
         if let Some(eff) = provider::resolve_effort(ov.thinking_effort.as_deref()) {
             map.insert("thinking_effort".to_string(), Value::String(eff));
         }
-        // Python truthiness: an empty gizmo_id is skipped; no_history only when true.
+        // An empty gizmo_id is skipped; no_history only when true.
         if let Some(g) = ov.gizmo_id.as_deref().filter(|g| !g.is_empty()) {
             map.insert("gizmo_id".to_string(), Value::String(g.to_string()));
         }
@@ -133,7 +122,8 @@ impl ChatSurface for PageSurface {
                 .eval("localStorage.removeItem('__shadow_overrides')", 30.0)
                 .await?;
         } else {
-            // localStorage.setItem('__shadow_overrides', json.dumps(json.dumps(ov)))
+            // Double-encoded: the overrides object is JSON-serialized, then that
+            // string is serialized again as the setItem argument.
             let inner = serde_json::to_string(&Value::Object(map))?;
             let arg = serde_json::to_string(&inner)?;
             self.cdp
@@ -147,7 +137,7 @@ impl ChatSurface for PageSurface {
     }
 
     async fn current_conversation_id(&self) -> anyhow::Result<Option<String>> {
-        // chat.py: location.pathname; "/c/<id>/..." carries the conversation id.
+        // location.pathname; "/c/<id>/..." carries the conversation id.
         let path = self.cdp.eval("location.pathname", 30.0).await?;
         let path = path.as_str().unwrap_or("");
         if let Some(rest) = path.split("/c/").nth(1) {
@@ -156,9 +146,9 @@ impl ChatSurface for PageSurface {
         Ok(None)
     }
 
-    /// chat.py `create_project` — create a memory-off ChatGPT Project through the
-    /// web app's OWN backend API, authed with the page session. Returns the
-    /// gizmo id (`g-p-...`) or None.
+    /// Create a memory-off ChatGPT Project through the web app's OWN backend
+    /// API, authed with the page session. Returns the gizmo id (`g-p-...`) or
+    /// None.
     async fn create_project(&self, name: &str) -> anyhow::Result<Option<String>> {
         let obj = json!({
             "instructions": "",
@@ -209,8 +199,8 @@ impl ChatSurface for PageSurface {
     }
 
     async fn wait_composer(&self) -> anyhow::Result<()> {
-        // chat.py returns a bool; the Python callers proceed regardless, so the
-        // adapter mirrors that (a timed-out composer is not an error).
+        // wait_composer returns a bool; callers proceed regardless, so a
+        // timed-out composer is not an error here.
         let _ = self.chat.wait_composer().await;
         Ok(())
     }
@@ -229,9 +219,8 @@ impl ChatSurface for PageSurface {
 
 // ===== the chimera /control rail =============================================
 
-/// The authed HTTP rail to chimera's `/control/*` endpoints
-/// (`_chimera_headers` / `_chimera_get` / `_chimera_post`): best-effort, any
-/// failure or non-200 collapses to `None` exactly like the Python `try/except`.
+/// The authed HTTP rail to chimera's `/control/*` endpoints: best-effort, any
+/// failure or non-200 collapses to `None`.
 #[derive(Clone)]
 struct ChimeraRail {
     http: reqwest::Client,
@@ -276,14 +265,12 @@ impl ChimeraRail {
 
 // ===== main-thread bookkeeping (router side) =================================
 
-/// The router-side half of `_main_thread_id`: the runtime OWNS the value (the
+/// The router-side half of the main-thread id: the runtime OWNS the value (the
 /// conductors read it via [`ConductorShim::main_thread_id`]), but it is the
-/// router's `get_conductor` that assigns it — same single attribute, two sides,
-/// exactly as in the Python class. Sync because the router consults it under
-/// its (sync) threads-map lock.
+/// router that assigns it. Sync because the router consults it under its (sync)
+/// threads-map lock.
 pub trait MainRegistry: Send + Sync {
-    /// `if self._main_thread_id is None and not subagent_kind:
-    ///      self._main_thread_id = key` — set-if-unset.
+    /// Set-if-unset: the first non-subagent thread becomes main.
     fn register_main_thread(&self, thread_id: &str);
     /// Sync read of the main thread id.
     fn main_thread_sync(&self) -> Option<String>;
@@ -298,28 +285,23 @@ pub trait MainRegistry: Send + Sync {
 pub struct ShimRuntime {
     cfg: ShadowConfig,
     jitter: Arc<provider::Jitter>,
-    /// `self.tabs` + `self._tabs_lock`.
     tabs: tokio::sync::Mutex<Option<Arc<TabFactory>>>,
-    /// `self._main_thread_id`.
     main_thread_id: std::sync::Mutex<Option<String>>,
     rail: ChimeraRail,
-    /// `self._pending_bind` — "codex:<T>", tab-open arrival order.
+    /// Pending binds ("codex:<T>"), in tab-open arrival order.
     pending_bind: Arc<tokio::sync::Mutex<Vec<String>>>,
-    /// `self._bound_sessions` — session tokens already bound/claimed.
+    /// Session tokens already bound/claimed.
     bound_sessions: Arc<tokio::sync::Mutex<HashSet<String>>>,
-    /// `self._bind_task`.
     bind_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// `self._bind_seeded`.
     bind_seeded: tokio::sync::Mutex<bool>,
-    /// `self._project_cache` (+ `self._project_lock` — the mutex doubles as it).
+    /// Per-folder project cache; the mutex doubles as its lock.
     project_cache: tokio::sync::Mutex<HashMap<String, String>>,
-    /// `self._cache_path`.
     cache_path: PathBuf,
 }
 
 impl ShimRuntime {
-    /// `ShadowResponsesShim.__init__`'s runtime half: load the file-backed
-    /// project cache (any read/parse failure resets to empty).
+    /// Load the file-backed project cache (any read/parse failure resets to
+    /// empty).
     pub fn new(cfg: ShadowConfig) -> Self {
         let cache_path = std::env::var("SHIM_PROJECT_CACHE")
             .ok()
@@ -347,8 +329,8 @@ impl ShimRuntime {
     }
 }
 
-/// `os.path.expanduser("~")` — USERPROFILE on Windows, HOME elsewhere; falls
-/// back to the cwd so the cache stays best-effort.
+/// The home directory — USERPROFILE on Windows, HOME elsewhere; falls back to
+/// the cwd so the cache stays best-effort.
 fn home_dir() -> PathBuf {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
@@ -392,12 +374,12 @@ impl ConductorShim for ShimRuntime {
         self.main_thread_sync()
     }
 
-    /// `shim._ensure_tabs()` — bring up the shared TabFactory once, WITH the
-    /// durable tab manifest so chatgpt.com tabs we opened in a crashed/killed
-    /// previous run are reconciled (closed) instead of leaking across restarts.
-    /// At startup no tab of ours is live yet, so every manifest survivor is an
-    /// orphan. The manifest only ever lists tabs WE created — a human's tabs
-    /// can never be touched.
+    /// Bring up the shared TabFactory once, with the durable tab manifest so
+    /// chatgpt.com tabs we opened in a crashed/killed previous run are
+    /// reconciled (closed) instead of leaking across restarts. At startup no tab
+    /// of ours is live yet, so every manifest survivor is an orphan. The
+    /// manifest only ever lists tabs WE created — a human's tabs can never be
+    /// touched.
     async fn ensure_tabs(&self) -> anyhow::Result<()> {
         let mut g = self.tabs.lock().await;
         if g.is_none() {
@@ -435,18 +417,18 @@ impl ConductorShim for ShimRuntime {
     }
 
     async fn close_tab(&self, target_id: &str) {
-        // Best-effort, like the Python's try/except around tabs.close_tab.
+        // Best-effort; failures are swallowed.
         let tabs = self.tabs.lock().await.clone();
         if let Some(tabs) = tabs {
             tabs.close_tab(target_id).await;
         }
     }
 
-    /// The ThreadConductor.boot page bring-up: this tab's OWN page socket
-    /// (`CDPClient.for_target`) + chat surface + WS tap, then the load-bearing
-    /// arm-BEFORE-navigate with the FETCH_WRAPPER and the composer wait. The
-    /// model/effort/gizmo axes are forced afterwards by the conductor through
-    /// `set_overrides` (the fetch-wrapper reads `__shadow_overrides`).
+    /// The conductor's page bring-up: this tab's OWN page socket + chat surface
+    /// + WS tap, then the load-bearing arm-BEFORE-navigate with the FETCH_WRAPPER
+    /// and the composer wait. The model/effort/gizmo axes are forced afterwards
+    /// by the conductor through `set_overrides` (the fetch-wrapper reads
+    /// `__shadow_overrides`).
     async fn open_page(
         &self,
         target_id: &str,
@@ -469,10 +451,9 @@ impl ConductorShim for ShimRuntime {
         let mut tap = WsTap::new(cdp.clone(), on_ws);
         tap.start().await?;
         tracing::debug!("[shim] open_page target={target_id}: tap armed, navigating");
-        // Python boot: arm_and_navigate(cdp, url, init_scripts=[FETCH_WRAPPER_JS])
-        // then chat._wait_composer(). The ?model= query is unnecessary here: the
-        // conductor resolves the slug afterwards and pins it via set_overrides,
-        // which the FETCH_WRAPPER applies to every /f/conversation turn body.
+        // No ?model= query is needed here: the conductor resolves the slug
+        // afterwards and pins it via set_overrides, which the FETCH_WRAPPER
+        // applies to every /f/conversation turn body.
         arm_and_navigate(
             &cdp,
             "https://chatgpt.com/",
@@ -486,10 +467,9 @@ impl ConductorShim for ShimRuntime {
         Ok(Arc::new(surface))
     }
 
-    /// `shim._seed_binds_once()` — one-time, BEFORE the first subagent tab
-    /// opens: explicitly bind every unbound chimera session that already exists
-    /// to "main", so elimination binding can never hand MAIN's long-lived
-    /// session to the first subagent.
+    /// One-time, BEFORE the first subagent tab opens: explicitly bind every
+    /// unbound chimera session that already exists to "main", so elimination
+    /// binding can never hand MAIN's long-lived session to the first subagent.
     async fn seed_binds_once(&self) -> anyhow::Result<()> {
         {
             let mut seeded = self.bind_seeded.lock().await;
@@ -523,8 +503,8 @@ impl ConductorShim for ShimRuntime {
         Ok(())
     }
 
-    /// `shim.enqueue_bind(thread_id)` — queue a freshly-tabbed non-main thread
-    /// for elimination binding and make sure the watcher is running.
+    /// Queue a freshly-tabbed non-main thread for elimination binding and make
+    /// sure the watcher is running.
     async fn enqueue_bind(&self, thread_id: &str) {
         self.pending_bind
             .lock()
@@ -540,15 +520,14 @@ impl ConductorShim for ShimRuntime {
         }
     }
 
-    /// `shim.resolve_project(cwd, chat)` — map a repo cwd to a memory-off
-    /// ChatGPT Project gizmo, creating + caching (file-backed) the first time a
-    /// folder is seen.
+    /// Map a repo cwd to a memory-off ChatGPT Project gizmo, creating + caching
+    /// (file-backed) the first time a folder is seen.
     async fn resolve_project(
         &self,
         cwd: &str,
         chat: &Arc<dyn ChatSurface>,
     ) -> anyhow::Result<Option<String>> {
-        // The cache mutex doubles as the Python's `_project_lock`.
+        // The cache mutex doubles as the project lock.
         let mut cache = self.project_cache.lock().await;
         if let Some(giz) = cache.get(cwd) {
             return Ok(Some(giz.clone()));
@@ -556,8 +535,7 @@ impl ConductorShim for ShimRuntime {
         let giz = chat.create_project(&project_name_for_cwd(cwd)).await?;
         if let Some(g) = &giz {
             cache.insert(cwd.to_string(), g.clone());
-            // Best-effort persist (Python try/except: pass), indent=2 like
-            // json.dump(..., indent=2).
+            // Best-effort persist (pretty-printed); a write failure is ignored.
             if let Ok(body) = serde_json::to_string_pretty(&*cache) {
                 let _ = std::fs::write(&self.cache_path, body);
             }
@@ -569,18 +547,16 @@ impl ConductorShim for ShimRuntime {
         Ok(giz)
     }
 
-    /// Tail chimera's `/events` SSE feed (the same stream the subagent driver
-    /// consumes, via `provider::stream_server_events`) and ping `on_event` once
-    /// per event: connector-tool liveness for the conductor's stall watchdog.
+    /// Tail chimera's `/events` SSE feed and ping `on_event` once per event:
+    /// connector-tool liveness for the conductor's stall watchdog.
     ///
     /// Scoped to THIS conversation's agent (`/events?agent=<id>`): chimera
-    /// stamps every event with the agent its session bound via repo_register
+    /// stamps every event with the agent its session bound to via repo_register
     /// ("main" / "codex:<thread>"), so only this conversation's tool activity
     /// resets this turn's watchdog — another thread's traffic can no longer
-    /// mask a genuinely dead, rate-limited turn for up to max_minutes.
-    /// A down/unreachable chimera ends the tail immediately and silently (one
-    /// debug line), degrading to the WS-only watchdog. No reconnects: each
-    /// fresh turn spawns a fresh tail.
+    /// mask a genuinely dead, rate-limited turn. A down/unreachable chimera ends
+    /// the tail immediately and silently (one debug line), degrading to the
+    /// WS-only watchdog. No reconnects: each fresh turn spawns a fresh tail.
     fn spawn_server_events_tail(
         &self,
         agent: &str,
@@ -611,10 +587,10 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// `shim._bind_watcher` — elimination binding: each NEW unbound chimera session
-/// binds to the next pending `codex:<T>` in tab arrival order. If the model
-/// self-bound (the injected repo_register directive), the pending entry shows
-/// up in `bound` and is dropped instead.
+/// Elimination binding: each NEW unbound chimera session binds to the next
+/// pending `codex:<T>` in tab arrival order. If the model self-bound (the
+/// injected repo_register directive), the pending entry shows up in `bound` and
+/// is dropped instead.
 async fn bind_watcher(
     rail: ChimeraRail,
     pending: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -683,7 +659,7 @@ async fn bind_watcher(
 
 // ===== ConductorMux ==========================================================
 
-/// The per-thread router (`get_conductor` + the `/control/*` lookup), installed
+/// The per-thread router (thread routing + the `/control/*` lookup), installed
 /// into [`crate::responses::ShadowResponsesShim`] as its [`TurnDriver`].
 pub struct ConductorMux {
     /// The runtime, conductor-facing (handed to every `ThreadConductor::new`).
@@ -693,17 +669,17 @@ pub struct ConductorMux {
     cfg: ShadowConfig,
     model: String,
     effort: Option<String>,
-    /// `self._threads` (+ `_threads_lock`). Sync mutex: get-or-create holds it
-    /// only across map ops, never across an await.
+    /// thread-id -> conductor. Sync mutex: get-or-create holds it only across
+    /// map ops, never across an await.
     threads: std::sync::Mutex<HashMap<String, Arc<ThreadConductor>>>,
-    /// `self._eager_main` — a pre-booted tab from eager boot; the first
-    /// non-subagent thread-id adopts it so single-agent never opens two tabs.
+    /// A pre-booted tab from eager boot; the first non-subagent thread-id adopts
+    /// it so single-agent never opens two tabs.
     eager_main: std::sync::Mutex<Option<Arc<ThreadConductor>>>,
 }
 
 impl ConductorMux {
-    /// `ShadowResponsesShim.__init__`'s router half. `shim` is the runtime
-    /// (typically [`ShimRuntime`]; tests pass a mock implementing both traits).
+    /// `shim` is the runtime (typically [`ShimRuntime`]; tests pass a mock
+    /// implementing both traits).
     pub fn new<S>(shim: Arc<S>, cfg: ShadowConfig, model: String, effort: Option<String>) -> Self
     where
         S: ConductorShim + MainRegistry + 'static,
@@ -729,16 +705,15 @@ impl ConductorMux {
         ))
     }
 
-    /// `get_conductor(thread_id, subagent_kind)` — return (creating if needed)
-    /// the conductor for a thread-id. The first NON-subagent thread becomes MAIN
-    /// and adopts any eager-booted tab; a subagent thread never steals that tab
-    /// and is never marked MAIN.
+    /// Return (creating if needed) the conductor for a thread-id. The first
+    /// NON-subagent thread becomes MAIN and adopts any eager-booted tab; a
+    /// subagent thread never steals that tab and is never marked MAIN.
     pub async fn get_conductor(
         &self,
         thread_id: Option<&str>,
         subagent_kind: Option<&str>,
     ) -> Arc<ThreadConductor> {
-        // Python truthiness: an absent OR empty header falls back / is ignored.
+        // An absent OR empty header falls back / is ignored.
         let base = thread_id.filter(|t| !t.is_empty()).unwrap_or("default");
         let subagent_kind = subagent_kind.filter(|s| !s.is_empty());
         // codex reuses the SESSION's thread-id for background subagent requests
@@ -776,24 +751,22 @@ impl ConductorMux {
                 };
                 threads.insert(key.clone(), tc.clone());
                 if subagent_kind.is_none() {
-                    // `if self._main_thread_id is None and not subagent_kind`.
+                    // First non-subagent thread becomes main (set-if-unset).
                     self.registry.register_main_thread(&key);
                 }
                 tc
             }
         };
-        // Existing conductor: `if subagent_kind and not tc.subagent_kind`;
-        // fresh conductor: the unconditional `tc.subagent_kind = subagent_kind`.
-        // `set_subagent_kind` (set-if-none) covers both.
+        // Set-if-none: a fresh conductor records the kind; an existing one keeps
+        // the kind it was created with.
         if let Some(kind) = subagent_kind {
             tc.set_subagent_kind(Some(kind.to_string())).await;
         }
         tc
     }
 
-    /// `conductor_for_control` — resolve a `/control` request to a conductor.
-    /// An explicit thread_id wins; absent one, fall back to MAIN. Tolerates the
-    /// `codex:<T>` binding form.
+    /// Resolve a `/control` request to a conductor. An explicit thread_id wins;
+    /// absent one, fall back to MAIN. Tolerates the `codex:<T>` binding form.
     pub fn conductor_for_control(&self, thread_id: Option<&str>) -> Option<Arc<ThreadConductor>> {
         let key = match thread_id.filter(|t| !t.is_empty()) {
             Some(t) => t.to_string(),
@@ -807,9 +780,9 @@ impl ConductorMux {
             .cloned()
     }
 
-    /// `await_control_conductor` — a chimera tool call can land a beat before
-    /// codex's Responses request has registered the conductor; poll briefly
-    /// rather than racing to a spurious 409.
+    /// A chimera tool call can land a beat before codex's Responses request has
+    /// registered the conductor; poll briefly rather than racing to a spurious
+    /// 409.
     pub async fn await_control_conductor(
         &self,
         thread_id: Option<&str>,

@@ -1,7 +1,5 @@
 //! Parser for ChatGPT's "v1" streaming JSON-patch delta encoding.
 //!
-//! Source: idare/shadow/v1delta.py (private original)
-//!
 //! ChatGPT streams a turn as JSON-patch-style deltas over its WebSocket. Each
 //! `data:` payload is one of:
 //!
@@ -21,26 +19,23 @@
 //! user-visible assistant message as answer text; chain-of-thought (cot) tokens
 //! are emitted separately as 'thinking'.
 //!
-//! # Hazards (preserved byte-for-byte from the Python)
+//! # Hazards
 //!   - The bare-`{"v":tok}` continuation appends to `last_append_path`. Patches /
 //!     replaces must NOT move that target — only an explicit `"append"` updates
 //!     it. Getting this wrong scrambles token order.
-//!   - The message map must be insertion-ordered for `_visible_message`'s "last
-//!     one wins" rule. We use a `Vec<(MessageId, Message)>` with linear lookup
-//!     (the Python relied on dict insertion order).
+//!   - The message map must be insertion-ordered for the visible-message "last
+//!     one wins" rule. We use a `Vec<(MessageId, Message)>` with linear lookup.
 
 use serde_json::Value;
 use std::collections::HashSet;
 
-/// Events emitted by [`V1DeltaParser::feed`]. Mirrors v1delta.py's `Event`
-/// tuple: `("token", str) | ("thinking", str) | ("turn_complete", str)`.
+/// Events emitted by [`V1DeltaParser::feed`]: token / thinking / turn_complete.
 ///
-/// `StreamError` is a Rust-side addition (incident fix wave 2): a typed event
-/// the parser previously discarded that matches obvious error shapes
-/// (rate-limit / moderation / server error). It carries the raw type plus the
-/// best-effort code/message so the conductor can fail the turn immediately
-/// instead of waiting out the 90s stall watchdog. The token-byte paths are
-/// untouched — this only adds handling for events that were dropped before.
+/// `StreamError` is a typed event matching obvious error shapes (rate-limit /
+/// moderation / server error). It carries the raw type plus the best-effort
+/// code/message so the conductor can fail the turn immediately instead of
+/// waiting out the 90s stall watchdog. The token-byte paths are untouched —
+/// this only adds handling for events that would otherwise be dropped.
 #[derive(Debug, Clone)]
 pub enum Event {
     Token(String),
@@ -57,13 +52,11 @@ pub enum Event {
 }
 
 /// A message id. ChatGPT ids arrive either as strings (`message.id`) or as
-/// arbitrary JSON scalars (`message_id` on markers, which can be ints). Python
-/// dict keys keep an int `5` and a string `"5"` distinct, so we key on the raw
-/// JSON value to preserve that exactly.
+/// arbitrary JSON scalars (`message_id` on markers, which can be ints). An int
+/// `5` and a string `"5"` are distinct keys, so we key on the raw JSON value.
 type MessageId = Value;
 
-/// One reconstructed message. Mirrors the Python dict
-/// `{role, parts, is_cot, visible}`.
+/// One reconstructed message.
 #[derive(Debug, Clone)]
 struct Message {
     role: String,
@@ -72,7 +65,6 @@ struct Message {
     visible: bool,
 }
 
-/// See `V1DeltaParser` in v1delta.py.
 #[derive(Debug)]
 pub struct V1DeltaParser {
     /// `id -> {role, parts, is_cot, visible}`, kept in insertion order.
@@ -101,7 +93,6 @@ impl Default for V1DeltaParser {
 impl V1DeltaParser {
     // ---- public ----
 
-    /// `V1DeltaParser.feed`.
     pub fn feed(&mut self, data: &str) -> Vec<Event> {
         let data = data.trim();
         if data.is_empty() || data == "\"v1\"" {
@@ -111,16 +102,14 @@ impl V1DeltaParser {
             Ok(v) => v,
             Err(_) => return Vec::new(),
         };
-        // `if not isinstance(obj, dict): return []`
         if !obj.is_object() {
             return Vec::new();
         }
 
         let t = obj.get("type");
-        // Python `obj.get("type")` is `None` when the key is absent. A present
-        // JSON `null` is `Value::Null` here, which we treat like a string we
-        // don't recognize (falls through the typed branches to `return []`),
-        // matching `t is not None` for an explicit null.
+        // An absent `type` key falls through to delta-op handling (the `None`
+        // arm). A present JSON `null` is `Value::Null` — treated like an
+        // unrecognized type (falls through the typed branches to `return []`).
         match t {
             Some(Value::String(s)) if s == "message_stream_complete" => {
                 return vec![Event::TurnComplete(self.answer_text())];
@@ -142,12 +131,11 @@ impl V1DeltaParser {
                 return Vec::new();
             }
             // Any other present `type` (a different string, or a non-string
-            // value like null/number) was previously discarded wholesale —
-            // which made rate-limit / moderation / server errors invisible
-            // (detection degraded to the 90s stall watchdog). Now: surface an
-            // error-shaped event as `StreamError`, and log everything else
-            // (once per type per turn) so real error shapes can be learned.
-            // Token-byte handling is unchanged.
+            // value like null/number): surface an error-shaped event as
+            // `StreamError` so rate-limit / moderation / server errors don't
+            // degrade to the 90s stall watchdog, and log everything else (once
+            // per type per turn) so real error shapes can be learned. Token-byte
+            // handling is unchanged.
             Some(t) => {
                 let etype = match t {
                     Value::String(s) => s.clone(),
@@ -171,7 +159,6 @@ impl V1DeltaParser {
         self.apply(&obj)
     }
 
-    /// `V1DeltaParser.answer_text`.
     pub fn answer_text(&self) -> String {
         match self.visible_message() {
             Some(msg) => msg.parts.concat(),
@@ -192,19 +179,18 @@ impl V1DeltaParser {
         }
     }
 
-    /// `V1DeltaParser._marker`.
     fn marker(&mut self, obj: &Value) {
         let mid = obj.get("message_id");
         let marker = obj
             .get("marker")
             .and_then(Value::as_str)
             .unwrap_or("");
-        // `if mid is None: return` — absent key.
+        // absent message_id -> skip.
         let mid = match mid {
             Some(v) => v.clone(),
             None => return,
         };
-        // `m = self.messages.setdefault(mid, {...visible: False})`
+        // existing message, or a fresh invisible one (visible flipped on below).
         let m = self.get_or_insert_with(&mid, || Message {
             role: "assistant".to_string(),
             parts: vec![String::new()],
@@ -218,16 +204,15 @@ impl V1DeltaParser {
         }
     }
 
-    /// `V1DeltaParser._register_message`.
     fn register_message(&mut self, message: &Value) {
         let mid = message.get("id");
-        // `if not mid: return` — falsy id (absent, null, empty string, etc.).
+        // skip on a falsy id (absent, null, empty string, etc.).
         let mid = match mid {
             Some(v) if is_truthy(v) => v.clone(),
             _ => return,
         };
 
-        // `role = (message.get("author") or {}).get("role", "assistant")`
+        // role from a truthy author object, defaulting to "assistant".
         let role = message
             .get("author")
             .filter(|a| is_truthy(a))
@@ -236,8 +221,8 @@ impl V1DeltaParser {
             .unwrap_or("assistant")
             .to_string();
 
-        // `parts = ((message.get("content") or {}).get("parts")) or [""]`
-        // `parts = [p if isinstance(p, str) else "" for p in parts] or [""]`
+        // parts from a truthy content object; non-string entries become "",
+        // and any falsy/missing result falls back to `[""]` (see below).
         let raw_parts = message
             .get("content")
             .filter(|c| is_truthy(c))
@@ -251,15 +236,13 @@ impl V1DeltaParser {
                         _ => String::new(),
                     })
                     .collect();
-                // `... or [""]` — a non-empty array maps to a non-empty
-                // (truthy) list, so it is kept as-is.
+                // a non-empty array is kept as-is.
                 mapped
             }
-            // Falsy `parts` (absent, null, empty array, non-array) -> `[""]`.
+            // falsy parts (absent, null, empty array, non-array) -> `[""]`.
             _ => vec![String::new()],
         };
 
-        // `existing = self.messages.get(mid, {})`
         let existing = self.get(&mid);
         let is_cot = existing.map(|m| m.is_cot).unwrap_or(false);
         let visible = existing
@@ -278,7 +261,6 @@ impl V1DeltaParser {
         self.current_id = Some(mid);
     }
 
-    /// `V1DeltaParser._apply`.
     fn apply(&mut self, obj: &Value) -> Vec<Event> {
         let op = obj.get("o");
         let path = obj.get("p");
@@ -328,13 +310,12 @@ impl V1DeltaParser {
         }
 
         // other explicit ops (replace status/metadata, etc.) — no event, no
-        // continuation change. `if op is not None and path is not None`
+        // continuation change.
         if op.is_some() && path.is_some() {
             return Vec::new();
         }
 
         // bare {"v": ...} — the streaming continuation.
-        // `if v is not None and op is None and path is None`
         if v.is_some() && op.is_none() && path.is_none() {
             let v_val = v.unwrap();
             if v_val.is_object() && v_val.get("message").is_some() {
@@ -349,9 +330,7 @@ impl V1DeltaParser {
         Vec::new()
     }
 
-    /// `V1DeltaParser._append`.
     fn append(&mut self, path: &str, v: Option<&Value>) -> Vec<Event> {
-        // `if not isinstance(v, str) or "/content/parts/" not in (path or ""):`
         let v_str = match v {
             Some(Value::String(s)) => s.clone(),
             _ => return Vec::new(),
@@ -359,7 +338,7 @@ impl V1DeltaParser {
         if !path.contains("/content/parts/") {
             return Vec::new();
         }
-        // `idx = int(path.rsplit("/", 1)[-1])` with `except: idx = 0`.
+        // idx = trailing path segment, falling back to 0 if it doesn't parse.
         let idx: usize = path
             .rsplit('/')
             .next()
@@ -374,24 +353,20 @@ impl V1DeltaParser {
             Some(m) => m,
             None => return Vec::new(),
         };
-        // `while len(msg["parts"]) <= idx: msg["parts"].append("")`
         while msg.parts.len() <= idx {
             msg.parts.push(String::new());
         }
-        // `msg["parts"][idx] += v`
         msg.parts[idx].push_str(&v_str);
 
         if msg.is_cot {
             return vec![Event::Thinking(v_str)];
         }
-        // `if msg.get("visible", True) and msg.get("role") == "assistant"`
         if msg.visible && msg.role == "assistant" {
             return vec![Event::Token(v_str)];
         }
         Vec::new()
     }
 
-    /// `V1DeltaParser._visible_message`.
     fn visible_message(&self) -> Option<&Message> {
         // the assistant message that's user-visible and not chain-of-thought;
         // last one wins (insertion order).
@@ -404,7 +379,7 @@ impl V1DeltaParser {
         best
     }
 
-    // ---- insertion-ordered map helpers (mirror Python dict semantics) ----
+    // ---- insertion-ordered map helpers ----
 
     fn get(&self, id: &MessageId) -> Option<&Message> {
         self.messages
@@ -420,8 +395,8 @@ impl V1DeltaParser {
             .map(|(_, m)| m)
     }
 
-    /// `dict[mid] = value` — replace in place (preserving the existing slot's
-    /// position) or append a new entry.
+    /// Replace in place (preserving the existing slot's position) or append a
+    /// new entry.
     fn insert(&mut self, id: MessageId, value: Message) {
         if let Some(slot) = self.messages.iter_mut().find(|(k, _)| *k == id) {
             slot.1 = value;
@@ -430,8 +405,8 @@ impl V1DeltaParser {
         }
     }
 
-    /// `dict.setdefault(mid, default)` — return the existing entry, or insert
-    /// the default (appended at the end) and return that.
+    /// Return the existing entry, or insert the default (appended at the end)
+    /// and return that.
     fn get_or_insert_with<F>(&mut self, id: &MessageId, default: F) -> &mut Message
     where
         F: FnOnce() -> Message,
@@ -491,8 +466,8 @@ fn error_fields(etype: &str, obj: &Value) -> Option<(String, String)> {
     Some((pick("code"), pick("message")))
 }
 
-/// Python truthiness for the JSON values we branch on (`message.get("id")`,
-/// `message.get("author") or {}`, `message.get("content") or {}`).
+/// Python-style truthiness for the JSON values we branch on (message id,
+/// author, content).
 ///
 /// Falsy: `None`/absent (handled by the caller via `Option`), JSON `null`,
 /// `false`, `0`/`0.0`, empty string, empty array, empty object.

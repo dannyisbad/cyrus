@@ -1,12 +1,9 @@
-//! Assembly glue: concrete adapters wiring the ported modules together.
-//!
-//! Source: repo-agent-mcp/src/index.ts (private original)
-//!         (`runHttp()` construction order + `runStdio()`)
+//! Assembly glue: concrete adapters wiring the modules together.
 //!
 //! `http.rs` owns the routing/auth/tunnel semantics and consumes three trait
 //! objects ([`StateAccess`], [`OAuthProvider`], [`McpDispatch`]). This module
-//! provides the concrete impls over the already-ported `state` / `oauth` / `mcp`
-//! modules, plus the config-view conversions (`config::RepoAgentConfig` ->
+//! provides the concrete impls over the `state` / `oauth` / `mcp` modules, plus
+//! the config-view conversions (`config::RepoAgentConfig` ->
 //! `state::RepoAgentConfig` / `tools::Config`) and the two transports'
 //! assembly entry points used by `http::run_http` / `http::run_stdio`.
 //!
@@ -311,7 +308,7 @@ impl StateAccess for StateBridge {
 /// Deserialize a control-plane capsule. Strict serde first (the lipsync harness
 /// sends complete `HandbackCapsule`s); on shape mismatch fall back to a lenient
 /// field-by-field read so a partial capsule still lands instead of being
-/// silently dropped (the TS stores whatever object it was handed).
+/// silently dropped.
 fn capsule_from_value(agent_id: &str, v: Value) -> HandbackCapsule {
     if let Ok(c) = serde_json::from_value::<HandbackCapsule>(v.clone()) {
         return c;

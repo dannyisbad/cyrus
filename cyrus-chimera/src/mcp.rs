@@ -1,29 +1,15 @@
 //! MCP server wiring: Streamable-HTTP transport + tool-registration glue.
 //!
-//! Source: repo-agent-mcp/src/index.ts (private original)
-//!         (createRepoMcpServer) + .../src/tools/harness.ts (registration shape)
-//!         + the @modelcontextprotocol/sdk McpServer / StreamableHTTPServerTransport
-//!           behaviour this port has to reproduce (no Rust MCP SDK exists).
+//! Stateless transport — one per request, no session state kept across requests.
+//! Every POST is handled in isolation; the per-request ChatGPT session is read
+//! from the `x-openai-session` header and threaded down via a tokio task-local
+//! (see [`SESSION`]).
 //!
-//! This module is the Rust replacement for two TS layers at once:
+//! [`meta_for_tool`] / [`visibility_for_exposure`] synthesize the widget `_meta`,
+//! and [`RepoMcpServer::register_tool`] mirrors `_meta.ui.resourceUri` up to a
+//! top-level `ui/resourceUri` key on the `tools/list` entry.
 //!
-//!   1. `@modelcontextprotocol/sdk`'s `McpServer` + `StreamableHTTPServerTransport`.
-//!      The TS constructs ONE transport per request with
-//!      `sessionIdGenerator: undefined` (stateless) and `enableJsonResponse: false`
-//!      (SSE responses). We mirror that exactly: there is NO session state kept
-//!      across requests — every POST is handled in isolation and the per-request
-//!      ChatGPT session is taken from the `x-openai-session` header and threaded
-//!      down explicitly (the TS used AsyncLocalStorage; Rust uses a tokio
-//!      task-local, see [`SESSION`]).
-//!
-//!   2. `@modelcontextprotocol/ext-apps`'s `registerAppTool`. There is no drop-in
-//!      Rust equivalent for the widget `_meta` it synthesises, so [`meta_for_tool`]
-//!      / [`visibility_for_exposure`] reproduce harness.ts byte-for-byte, and
-//!      [`RepoMcpServer::register_tool`] reproduces `registerAppTool`'s post-process
-//!      step that mirrors `_meta.ui.resourceUri` up to a top-level `ui/resourceUri`
-//!      key on the `tools/list` entry.
-//!
-//! Wire fidelity notes (verified against the bundled SDK at port time):
+//! Wire notes:
 //!   - `initialize` result = `{ protocolVersion, capabilities, serverInfo
 //!     [, instructions] }`. `protocolVersion` echoes the client's requested
 //!     version when supported, else falls back to the latest. `capabilities`

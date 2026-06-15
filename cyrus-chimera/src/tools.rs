@@ -1,16 +1,10 @@
 //! The `repo_*` tool surface: schemas, handlers, and the standalone repo ops
 //! (shell / apply_patch / file read-write-edit-glob-grep / background procs).
 //!
-//! Source: repo-agent-mcp/src/tools/register.ts (private original)
-//!         (+ core/: command.ts, shell.ts, files.ts, path.ts, permissions.ts,
-//!          projects.ts, bg.ts; result.ts; types.ts)
+//! Thin standalone impls — this module deliberately does NOT path-depend on
+//! codex-rs (apply_patch / exec-sandbox reuse is a TODO).
 //!
-//! Per the brief these are THIN STANDALONE Rust impls — this module deliberately
-//! does NOT path-depend on codex-rs (apply_patch / exec-sandbox reuse is a TODO).
-//! Because the sibling modules (config.rs / state.rs / ...) are still scaffolds,
-//! everything this file needs is defined here so it compiles on its own.
-//!
-//! Behavioral fidelity notes preserved from the TS:
+//! Behavioral notes:
 //!   - `trim_middle` head/tail ratios are 0.58 / 0.32 (load-bearing).
 //!   - the deny-regex floor is matched against quote-masked text so a dangerous
 //!     token inside a quoted literal does not trip, while command substitution

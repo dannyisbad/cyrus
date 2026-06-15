@@ -1,10 +1,7 @@
-//! Command-line entry for the chimera server.
-//!
-//! Direct port of `index.ts` (the Node entry module). Responsibilities, in the
-//! same order as the original:
-//!   1. Install SIGINT / SIGTERM handlers that kill all background processes
-//!      (`killAllBackground`) and then exit with code 0.
-//!   2. Decide the transport with `wantsHttp()` — HTTP is the default; `--stdio`
+//! Command-line entry for the chimera server. Responsibilities:
+//!   1. Install SIGINT / SIGTERM handlers that kill all background processes and
+//!      then exit with code 0.
+//!   2. Decide the transport with `wants_http()` — HTTP is the default; `--stdio`
 //!      (without `--http`) selects the stdio MCP loop.
 //!   3. Run the chosen server; the error is returned to the caller, which logs
 //!      it and exits with code 1.
@@ -16,20 +13,10 @@
 //! [`crate::config`], whose lookups are flag-based, so an extra leading
 //! `chimera` positional (present in busybox mode) is ignored.
 //!
-//! Source: repo-agent-mcp/src/index.ts (private original)
-//!
-//! ## Shutdown hazard (preserved from the TS)
-//!
-//! index.ts registers, for both SIGINT and SIGTERM:
-//!
-//! ```js
-//! process.on(sig, () => { killAllBackground(); process.exit(0); });
-//! ```
-//!
-//! i.e. every spawned background child (the `core/bg.ts` REGISTRY) MUST be
-//! tree-killed *before* the process exits — otherwise detached children (own
-//! process group on POSIX, `taskkill /T` on Windows) are orphaned. We reproduce
-//! that here: on either signal we call `kill_all_background()` and exit(0).
+//! Shutdown hazard: every spawned background child MUST be tree-killed *before*
+//! the process exits — otherwise detached children (own process group on POSIX,
+//! `taskkill /T` on Windows) are orphaned. On either signal we call
+//! `kill_all_background()` then exit(0).
 
 use crate::config;
 use crate::http;
@@ -59,31 +46,25 @@ Environment:
 /// runtime (it spawns the signal-handler task). Returns the server's result;
 /// `--help` prints usage and returns `Ok(())` without starting a server.
 pub async fn run_cli() -> anyhow::Result<()> {
-    // `-h` / `--help`: print usage and return before any server work. (The
-    // original index.ts has no help text — this is a port-side affordance only;
-    // it changes nothing when the flag is absent.)
+    // `-h` / `--help`: print usage and return before any server work.
     if std::env::args().skip(1).any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
         return Ok(());
     }
 
-    // index.ts logs via plain `console.log` / `console.error` (stdout / stderr);
-    // the startup println!s are kept for parity. But the tool dispatcher and the
-    // scan/walk paths log through `tracing`, so a subscriber must actually be
-    // installed — without one every tracing macro is a no-op and the redirected
-    // chimera.log stays 0 bytes (the incident). Write to STDERR: Rust's stderr is
-    // unbuffered, and cyrus-setup's stack.rs dups stderr into
+    // The tool dispatcher and the scan/walk paths log through `tracing`, so a
+    // subscriber must be installed — without one every tracing macro is a no-op
+    // and the redirected chimera.log stays 0 bytes. Write to STDERR: Rust's
+    // stderr is unbuffered, and cyrus-setup's stack.rs dups stderr into
     // ~/.cyrus/logs/chimera.log, so events land in the file immediately.
     init_tracing();
 
-    // Mirror index.ts top-level: install the signal handlers up front, before
-    // any transport starts, so a Ctrl-C during startup still tears down cleanly.
+    // Install the signal handlers up front, before any transport starts, so a
+    // Ctrl-C during startup still tears down cleanly.
     install_signal_handlers();
 
-    // `loadConfig()` — merge DEFAULTS < repo-agent.config.json < env < argv.
     let cfg = config::load_config();
 
-    // `wantsHttp()` — `--http` present OR `--stdio` absent.
     if config::wants_http() {
         http::run_http(cfg).await
     } else {
@@ -111,16 +92,9 @@ fn init_tracing() {
 /// Spawn a background task that waits on the OS termination signals and, on the
 /// first one, kills all background children and exits the process with code 0.
 ///
-/// Reproduces:
-/// ```js
-/// for (const sig of ["SIGINT", "SIGTERM"] as const) {
-///   process.on(sig, () => { killAllBackground(); process.exit(0); });
-/// }
-/// ```
-///
 /// On Windows there is no SIGTERM in the POSIX sense; the closest equivalents
 /// tokio exposes are Ctrl-C, Ctrl-Break, and the console-shutdown event, so we
-/// listen on those. On Unix we listen on SIGINT + SIGTERM exactly as the TS does.
+/// listen on those. On Unix we listen on SIGINT + SIGTERM.
 fn install_signal_handlers() {
     tokio::spawn(async move {
         wait_for_terminate_signal().await;
@@ -135,8 +109,8 @@ async fn wait_for_terminate_signal() {
     use tokio::signal::unix::{signal, SignalKind};
 
     // If either stream fails to install we fall back to just awaiting Ctrl-C so
-    // the process is still interruptible (the TS has no such failure mode, but
-    // registering a Unix signal handler can fail and we must not panic startup).
+    // the process is still interruptible (registering a Unix signal handler can
+    // fail and we must not panic startup).
     let mut sigint = match signal(SignalKind::interrupt()) {
         Ok(s) => s,
         Err(_) => {
@@ -200,11 +174,8 @@ async fn wait_for_terminate_signal() {
     }
 }
 
-/// `killAllBackground()` from `core/bg.ts`: tree-kill every still-running
-/// background child in the registry, marking each "killed".
-///
-/// `core::bg`'s registry is ported into `tools` (the background-process surface
-/// backing repo_shell({background:true}) / repo_bg_*). Drain it on shutdown.
+/// Tree-kill every still-running background child in the registry (the surface
+/// backing repo_shell({background:true}) / repo_bg_*), marking each "killed".
 fn kill_all_background() {
     crate::tools::kill_all_background();
 }

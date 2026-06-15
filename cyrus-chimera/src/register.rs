@@ -1,11 +1,7 @@
 //! `register_repo_tools` — the concrete MCP tool surface.
 //!
-//! Source: repo-agent-mcp/src/tools/register.ts (private original)
-//!         (+ src/tools/harness.ts, src/tools/subagent.ts)
-//!
-//! This is the port of `registerRepoTools(server, config, state)`: it registers
-//! every named `repo_*` / codex-native tool (name + JSON input schema + exposure
-//! + handler) on a [`RepoMcpServerBuilder`]. The registration framework
+//! Registers every named `repo_*` / codex-native tool (name + JSON input schema
+//! + exposure + handler) on a [`RepoMcpServerBuilder`]. The registration framework
 //! (`register_tool`, `ToolSpec`, `ToolReply`, `_meta` synthesis) lives in
 //! [`crate::mcp`]; the repo OPERATIONS (file read/write/edit/glob/grep, shell, the
 //! background registry, projects, command review, permissions) live in

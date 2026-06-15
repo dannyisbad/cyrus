@@ -1,7 +1,6 @@
 //! Durable repo state: event log, notes, capsules, approvals, path leases, and
 //! the session->agent attribution map. Plus the auto-compaction capsule builder.
 //!
-//! Source: repo-agent-mcp/src/state/store.ts (private original)
 //!         (+ types.ts: ToolEvent, ApprovalRequest, Capsule, PathLease, MemoryNote)
 //!
 //! Behavioral fidelity notes (vs. the TS original):
@@ -42,7 +41,6 @@ use uuid::Uuid;
 // it; the field set here is precisely what `RepoState` touches.
 // ---------------------------------------------------------------------------
 
-/// `AutoCompactConfig` from types.ts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoCompactConfig {
     pub enabled: bool,
@@ -137,7 +135,6 @@ pub struct ParsedCommandSummary {
     pub query: Option<String>,
 }
 
-/// `MemoryNote` (exported from store.ts).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryNote {
     pub id: String,
@@ -227,7 +224,6 @@ mod serde_with_double_option {
     }
 }
 
-/// `ApprovalRequest` from types.ts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     pub id: String,
@@ -248,7 +244,6 @@ pub struct ApprovalRequest {
     pub status: ApprovalDecision,
 }
 
-/// `BlobRef` from types.ts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobRef {
     pub id: String,
@@ -257,7 +252,6 @@ pub struct BlobRef {
     pub path: String,
 }
 
-/// `CompactionNotice` from types.ts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionNotice {
     #[serde(rename = "capsuleId")]
@@ -268,7 +262,6 @@ pub struct CompactionNotice {
     pub next_action: String,
 }
 
-/// `Capsule` from types.ts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Capsule {
     pub id: String,
@@ -291,7 +284,6 @@ pub struct Capsule {
     pub hot_blobs: Vec<String>,
 }
 
-/// `PathLease` from types.ts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PathLease {
     #[serde(rename = "leaseId")]
@@ -303,7 +295,6 @@ pub struct PathLease {
     pub ts: String,
 }
 
-/// `HandbackCapsule` from types.ts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandbackCapsule {
     #[serde(rename = "agentId")]
@@ -326,7 +317,6 @@ pub struct SubagentProgress {
     pub last_summary: String,
 }
 
-/// `SubagentJob` from types.ts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentJob {
     #[serde(rename = "agentId")]

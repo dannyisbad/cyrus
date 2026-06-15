@@ -1,14 +1,12 @@
 //! Tab lifecycle over a BROWSER-scoped CDP control socket (Target.* operations),
 //! plus the arm-before-navigate helper.
 //!
-//! Source: idare/shadow/tab_factory.py (private original)
-//!
 //! Creates/closes/lists ChatGPT tabs through a BROWSER-scoped control socket
 //! (`Target.*` lives at the browser endpoint, not a page session). Each subagent
 //! then attaches its OWN page socket via [`crate::cdp::CdpClient`] `for_target` —
 //! that per-tab socket is what makes WS token cross-talk structurally impossible.
 //!
-//! Hardening baked in (mirrors the Python module docstring):
+//! Hardening baked in:
 //!   * [`arm_and_navigate`]: open to about:blank, install document-start scripts +
 //!     `Network.enable` BEFORE navigating, so the opening-burst of ChatGPT's own
 //!     WebSocket is never missed (the "first turn truncated" failure).
@@ -46,12 +44,11 @@ use crate::cdp::CdpClient;
 /// Browser control websocket (browser-protocol level, not a page session).
 type ControlWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Browser-scoped CDP socket for `Target.*` operations. See `BrowserControl` in
-/// tab_factory.py.
+/// Browser-scoped CDP socket for `Target.*` operations.
 ///
-/// All command traffic is serialized behind `inner`'s lock, mirroring the
-/// Python `asyncio.Lock`: a single browser socket carries every `Target.*` call,
-/// so concurrent callers must take turns on the wire.
+/// All command traffic is serialized behind `inner`'s lock: a single browser
+/// socket carries every `Target.*` call, so concurrent callers must take turns
+/// on the wire.
 pub struct BrowserControl {
     host: String,
     port: u16,
@@ -60,16 +57,16 @@ pub struct BrowserControl {
 }
 
 /// The mutable half of [`BrowserControl`]: the open websocket and the monotonic
-/// command id. Behind a single lock so `_cmd` is atomic end-to-end (send +
-/// read the matching reply) exactly like the Python coroutine under its lock.
+/// command id. Behind a single lock so `cmd` is atomic end-to-end (send + read
+/// the matching reply).
 struct ControlState {
     ws: Option<ControlWs>,
     id: i64,
 }
 
 /// One entry of Chrome's `/json` target list (and `Target.getTargets`'
-/// `targetInfos`). Only the fields the Python touches are modeled; the wire
-/// carries more and we ignore the rest.
+/// `targetInfos`). Only the fields we use are modeled; the wire carries more
+/// and we ignore the rest.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TargetInfo {
     /// `id` from `/json`, or `targetId` from `Target.getTargets` (see
@@ -97,7 +94,6 @@ impl TargetInfo {
 }
 
 impl BrowserControl {
-    /// `BrowserControl.__init__`.
     pub fn new(host: impl Into<String>, port: u16) -> Self {
         Self {
             host: host.into(),
@@ -107,17 +103,15 @@ impl BrowserControl {
         }
     }
 
-    /// `BrowserControl.base` — `http://{host}:{port}`.
+    /// `http://{host}:{port}`.
     pub fn base(&self) -> String {
         format!("http://{}:{}", self.host, self.port)
     }
 
-    /// `BrowserControl.connect`.
-    ///
     /// Discover the browser endpoint's `webSocketDebuggerUrl` via
     /// `{base}/json/version`, then open the control socket with the frame-size
-    /// caps disabled (the Python passed `max_msg_size=0`; CDP DOM payloads can be
-    /// large, and a cap would truncate them).
+    /// caps disabled: CDP DOM payloads can be large, and a cap would truncate
+    /// them.
     pub async fn connect(&self) -> anyhow::Result<()> {
         let ver: Value = self
             .http
@@ -134,8 +128,8 @@ impl BrowserControl {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("no webSocketDebuggerUrl in /json/version"))?;
 
-        // Disable the message/frame size caps (Python: max_msg_size=0). Without
-        // this, large CDP payloads truncate.
+        // Disable the message/frame size caps; without this, large CDP payloads
+        // truncate.
         let mut config = WebSocketConfig::default();
         config.max_message_size = None;
         config.max_frame_size = None;
@@ -150,11 +144,10 @@ impl BrowserControl {
         Ok(())
     }
 
-    /// `BrowserControl._cmd` — send a command and await its id-correlated reply.
+    /// Send a command and await its id-correlated reply.
     ///
-    /// Held entirely under the lock so the send and the matching read are atomic,
-    /// matching the Python coroutine that ran inside `async with self._lock`.
-    /// Default timeout is 20s, as in the Python.
+    /// Held entirely under the lock so the send and the matching read are
+    /// atomic. Default timeout is 20s.
     async fn cmd(&self, method: &str, params: Value) -> anyhow::Result<Value> {
         self.cmd_timeout(method, params, Duration::from_secs(20))
             .await
@@ -181,9 +174,8 @@ impl BrowserControl {
             .await
             .context("send Target.* command")?;
 
-        // Read until we see our id, mirroring the Python `_read` that scans the
-        // incoming stream for `d["id"] == mid`. The whole read is wrapped in the
-        // command timeout.
+        // Read until we see our id (scan the incoming stream for a reply whose
+        // `id` matches `mid`). The whole read is wrapped in the command timeout.
         let read = async {
             while let Some(msg) = ws.next().await {
                 let msg = msg.context("browser control socket read")?;
@@ -214,7 +206,7 @@ impl BrowserControl {
         }
     }
 
-    /// `BrowserControl.create_target` — returns the new `targetId`.
+    /// Returns the new `targetId`.
     pub async fn create_target(&self, url: &str) -> anyhow::Result<String> {
         let r = self
             .cmd("Target.createTarget", json!({ "url": url }))
@@ -225,22 +217,21 @@ impl BrowserControl {
             .ok_or_else(|| anyhow!("Target.createTarget returned no targetId"))
     }
 
-    /// `BrowserControl.close_target` — best-effort, swallows errors like the
-    /// Python `try/except: pass`.
+    /// Best-effort; swallows errors.
     pub async fn close_target(&self, target_id: &str) {
         let _ = self
             .cmd("Target.closeTarget", json!({ "targetId": target_id }))
             .await;
     }
 
-    /// `BrowserControl.activate_target` — best-effort, swallows errors.
+    /// Best-effort; swallows errors.
     pub async fn activate_target(&self, target_id: &str) {
         let _ = self
             .cmd("Target.activateTarget", json!({ "targetId": target_id }))
             .await;
     }
 
-    /// `BrowserControl.get_targets` — `targetInfos` from `Target.getTargets`.
+    /// `targetInfos` from `Target.getTargets`.
     pub async fn get_targets(&self) -> anyhow::Result<Vec<TargetInfo>> {
         let r = self.cmd("Target.getTargets", json!({})).await?;
         let infos = r
@@ -291,7 +282,7 @@ impl BrowserControl {
 /// ORDERING IS LOAD-BEARING — `Page.enable`, install each init script, then
 /// `Network.enable`, and only THEN navigate. Doing the navigate first loses
 /// ChatGPT's opening WebSocket burst ("first turn truncated"). Init-script
-/// installation is best-effort (the Python wraps each in `try/except: pass`).
+/// installation is best-effort.
 pub async fn arm_and_navigate(
     cdp: &CdpClient,
     url: &str,

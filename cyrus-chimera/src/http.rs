@@ -1,8 +1,6 @@
 //! HTTP server: routing, auth gating, CORS, tunnel detection, body limits.
 //!
-//! Source: repo-agent-mcp/src/index.ts (private original)
-//!
-//! axum router (mirrors `runHttp()` in index.ts):
+//! axum router:
 //!   GET  /                      -> server info JSON
 //!   GET  /events                -> SSE tool-event tail (loopback-only; seq cursor,
 //!                                  ?agent= scope, Last-Event-ID / ?since= resume)
@@ -14,26 +12,17 @@
 //!   *    /oauth/{authorize,token,userinfo,jwks}
 //!   POST|GET|DELETE /mcp        -> MCP Streamable-HTTP transport (mcp.rs)
 //!
-//! Hazards (all reproduced below, byte-for-byte where it matters):
+//! Hazards:
 //!   - `via_tunnel()` keys off Cloudflare headers (cf-connecting-ip / cf-ray /
 //!     cdn-loop). Loopback surfaces (`/events`, `/snapshot`, `/control/*`) must
 //!     **404** (not 401) through the tunnel so their existence isn't leaked.
 //!   - Fail-closed rule: serving `/mcp` over a tunnel with NO bearer configured
 //!     must **403**, never fall through to the open `auth_ok` path (which is open
 //!     when no token + no oauth are configured).
-//!   - The TS attributes events to subagents via the `x-openai-session` header,
-//!     propagated through AsyncLocalStorage. There is no implicit async context in
-//!     Rust, so the session id is read synchronously off the request and passed
-//!     down explicitly (also stashed in a `tokio::task_local!` for the duration of
-//!     the MCP dispatch so the state layer can read it the way `currentSession()`
-//!     does in the TS).
-//!
-//! Note on module boundaries: this port owns ONLY `http.rs`. The sibling modules
-//! (`config`, `state`, `oauth`, `mcp`, `subagent`) are still skeleton stubs, so
-//! the behavioral contract this router needs from them is expressed here as small
-//! traits (`StateAccess`, `OAuthProvider`) plus a config view (`HttpConfig`). When
-//! those modules are filled in they implement these traits (or the wiring is
-//! reconciled), and the routing/auth/tunnel semantics in this file stay fixed.
+//!   - Events are attributed to subagents via the `x-openai-session` header. The
+//!     session id is read synchronously off the request and threaded down (and
+//!     stashed in a `tokio::task_local!` for the MCP dispatch so the state layer
+//!     can read it).
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;

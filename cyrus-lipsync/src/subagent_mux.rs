@@ -2,47 +2,23 @@
 //! SUBAGENT ChatGPT tabs only; their tool calls execute inside chimera (gated on
 //! the "main" session, so invisible to the codex TUI).
 //!
-//! Source: idare/shadow/subagent_mux.py (private original)
-//!         (+ subprovider.py, which it reuses verbatim — ported alongside)
+//! All the DOM/parse/tap helpers are self-contained inline here; only
+//! [`CdpClient`] and [`ShadowConfig`] are shared crate types.
 //!
-//! ## Faithful 1:1 port of subagent_mux.py + subprovider.py
-//!
-//! `SubagentMux` and `SubProvider` are direct ports. The Python reused, by import,
-//! a set of sibling modules (chat.py's `ChatSurface` + recovery/status helpers +
-//! `FETCH_WRAPPER_JS`, tab_factory.py's `TabFactory`/`arm_and_navigate`,
-//! server_events.py's `stream_server_events`, stream_events.py's `TextEvent` /
-//! `ToolCallEvent` / `ToolResultEvent`). In this Rust tree those sibling modules
-//! are still port stubs (no usable public surface yet) and this port is restricted
-//! to writing THIS one file, so the pieces SubProvider needs are ported INLINE
-//! here, as private helpers:
-//!   - `ChatSurface` (the brittle DOM bits + override/model resolution),
-//!   - `arm_and_navigate`, `TabFactory`, `BrowserControl` (tab lifecycle),
-//!   - `stream_server_events` (the repo-agent /events SSE tail),
-//!   - `TextEvent` / `ToolCallEvent` / `ToolResultEvent` (`StreamEvent`),
-//!   - `parse_status` / `strip_status` / `block_recovery_msg` / `loop_recovery_msg`,
-//!   - `FETCH_WRAPPER_JS` and the ChatGPT DOM JS snippets (copied byte-for-byte),
-//!   - a `V1DeltaParser` (v1delta.py) + WS/SSE tap (wstap.py), inlined for the same
-//!     reason (their sibling modules don't yet expose a compilable surface against
-//!     this crate's real `cdp::CdpClient`).
-//! Only `cdp::CdpClient` and `config::ShadowConfig` are consumed from siblings —
-//! both are fully implemented. When the sibling modules land, these inline copies
-//! should collapse into `use` imports; behavior is identical.
-//!
-//! DEPRECATION (from the Python header, dated 2026-06-10 — do NOT delete yet):
-//!   This OFF-codex path is superseded by NATIVE codex-thread subagents once the
-//!   conductor's thread-id routing lands (conductor.rs). Four checks must pass
-//!   before retiring it (two-thread isolation test; live native spawn renders in
-//!   codex TUI; chimera's relay gate re-derived; multi-tab CDP contention proven).
-//!   Until then this stays the working subagent path.
+//! DEPRECATION (do NOT delete yet): this off-codex path is superseded by NATIVE
+//! codex-thread subagents once the conductor's thread-id routing lands
+//! (conductor.rs). Four checks must pass before retiring it (two-thread isolation
+//! test; live native spawn renders in codex TUI; chimera's relay gate re-derived;
+//! multi-tab CDP contention proven). Until then this stays the working path.
 //!
 //! Hazards:
-//!   - This module's SubProvider path is the ONLY place N shim-owned tabs were
-//!     proven to coexist; if the conductor takes over, re-verify multi-tab CDP
-//!     target contention there.
+//!   - This SubProvider path is the ONLY place N shim-owned tabs were proven to
+//!     coexist; if the conductor takes over, re-verify multi-tab CDP target
+//!     contention there.
 //!   - The chimera relay gate (agentForSession != "main") changes meaning under
 //!     native threads — coordinate any change with cyrus-chimera::state/subagent.
 //!   - The `FETCH_WRAPPER_JS` injection string and the v1delta/WS-tap decoding are
-//!     reverse-engineered wire formats; they are copied verbatim — do not reflow.
+//!     reverse-engineered wire formats — do not reflow.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,11 +33,9 @@ use crate::cdp::CdpClient;
 use crate::config::ShadowConfig;
 
 // ===========================================================================
-// SubagentMux — direct port of subagent_mux.py
+// SubagentMux
 // ===========================================================================
 
-/// See `SubagentMux` in subagent_mux.py.
-///
 /// The off-codex multiplexer: polls /control/subagents, opens a tab + SubProvider
 /// per pending job, POSTs the result capsule, and does elimination binding (first
 /// unbound chimera session -> "main", later ones -> the next spawned sub in arrival
@@ -81,7 +55,6 @@ pub struct SubagentMux {
 }
 
 impl SubagentMux {
-    /// `SubagentMux.__init__`.
     pub fn new(cfg: ShadowConfig) -> Self {
         let server_url = cfg.server_url.clone();
         let mut pending: VecDeque<String> = VecDeque::new();
@@ -99,9 +72,9 @@ impl SubagentMux {
         }
     }
 
-    // ----- /control client (mirror provider.py) -----
+    // ----- /control client -----
 
-    /// `SubagentMux._hdr`: content-type plus an optional bearer.
+    /// content-type plus an optional bearer.
     fn apply_headers(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         req = req.header("content-type", "application/json");
         if let Some(bearer) = self.cfg.server_bearer.as_deref() {
@@ -110,8 +83,8 @@ impl SubagentMux {
         req
     }
 
-    /// `SubagentMux._get`: GET path, returning the parsed JSON on 200 else None.
-    /// All transport/parse errors are swallowed (Python `try/except: pass`).
+    /// GET path, returning the parsed JSON on 200 else None. All transport/parse
+    /// errors are swallowed.
     async fn ctrl_get(&self, path: &str) -> Option<Value> {
         let url = format!("{}{}", self.server_url.trim_end_matches('/'), path);
         let req = self.apply_headers(self.http.get(url));
@@ -121,8 +94,7 @@ impl SubagentMux {
         }
     }
 
-    /// `SubagentMux._post`: POST JSON body, returning the parsed JSON on 200 else
-    /// None. Errors swallowed.
+    /// POST JSON body, returning the parsed JSON on 200 else None. Errors swallowed.
     async fn ctrl_post(&self, path: &str, body: Value) -> Option<Value> {
         let url = format!("{}{}", self.server_url.trim_end_matches('/'), path);
         let req = self.apply_headers(self.http.post(url).json(&body));
@@ -132,7 +104,7 @@ impl SubagentMux {
         }
     }
 
-    /// `SubagentMux._live`: agent ids whose SubProvider is spawning/running.
+    /// Agent ids whose SubProvider is spawning/running.
     async fn live(&self) -> Vec<String> {
         let subs = self.subs.lock().await;
         subs.iter()
@@ -144,8 +116,8 @@ impl SubagentMux {
             .collect()
     }
 
-    /// `SubagentMux.start`: bring up the tab factory, then run the spawn + bind
-    /// watchers concurrently until cancelled. Always tears down on exit.
+    /// Bring up the tab factory, then run the spawn + bind watchers concurrently
+    /// until cancelled. Always tears down on exit.
     pub async fn start(self) -> anyhow::Result<()> {
         let this = Arc::new(self);
         this.tabs.start().await?;
@@ -154,7 +126,7 @@ impl SubagentMux {
             this.server_url, this.cfg.max_subagents
         );
 
-        // asyncio.Event() shared stop flag, set when either watcher returns.
+        // Shared stop flag, set when either watcher returns.
         let stop = Arc::new(StopFlag::new());
 
         let spawn = {
@@ -168,18 +140,17 @@ impl SubagentMux {
             tokio::spawn(async move { this.bind_watcher(stop).await })
         };
 
-        // asyncio.gather(...) — runs both forever; we await both (they only end on
-        // cancellation / process shutdown).
+        // Runs both forever; they only end on cancellation / process shutdown.
         let _ = tokio::join!(spawn, bind);
 
         this.close().await;
         Ok(())
     }
 
-    // ----- the three loops (lifted from provider.py) -----
+    // ----- the three loops -----
 
-    /// `SubagentMux._spawn_watcher`: poll /control/subagents; for each new
-    /// pending/spawning job under the concurrency cap, fire `_run_sub`.
+    /// Poll /control/subagents; for each new pending/spawning job under the
+    /// concurrency cap, fire a run task.
     async fn spawn_watcher(self: Arc<Self>, stop: Arc<StopFlag>) {
         while !stop.is_set() {
             let data = self.ctrl_get("/control/subagents").await;
@@ -226,11 +197,10 @@ impl SubagentMux {
         }
     }
 
-    /// `SubagentMux._run_sub`: open a tab, build a SubProvider, mark it running via
-    /// /control/subagent/update, attach + run, POST the result capsule to
-    /// /control/subagent/result, then close the tab. The capsule is initialized to
-    /// a "crashed / spawn failed" default and overwritten on success, exactly like
-    /// the Python try/except/finally.
+    /// Open a tab, build a SubProvider, mark it running via /control/subagent/update,
+    /// attach + run, POST the result capsule to /control/subagent/result, then close
+    /// the tab. The capsule starts as a "crashed / spawn failed" default and is
+    /// overwritten on success.
     async fn run_sub(self: Arc<Self>, job: Value) {
         let aid = job
             .get("agentId")
@@ -257,10 +227,9 @@ impl SubagentMux {
 
         let t0 = Instant::now();
 
-        // The whole try body. On success it yields (target_id, RunResult); on the
-        // first error it returns the targetId reached so far (so `finally` can still
-        // close the tab) alongside the error, exactly like the Python try/finally
-        // where `target_id` is set before the failing await.
+        // On success this yields (target_id, RunResult); on the first error it
+        // returns the targetId reached so far (so the teardown below can still close
+        // the tab) alongside the error.
         let attempt: Result<(String, RunResult), (Option<String>, anyhow::Error)> = async {
             let tid = self
                 .tabs
@@ -278,7 +247,7 @@ impl SubagentMux {
                 effort.clone(),
             ));
             self.subs.lock().await.insert(aid.clone(), Arc::clone(&sub));
-            // next new unbound chimera session = this sub.
+            // The next new unbound chimera session binds to this sub.
             self.pending_bind
                 .lock()
                 .expect("pending_bind poisoned")
@@ -329,7 +298,7 @@ impl SubagentMux {
             }
         };
 
-        // ----- finally -----
+        // ----- teardown -----
         let status = capsule
             .get("status")
             .and_then(Value::as_str)
@@ -352,14 +321,14 @@ impl SubagentMux {
             sub.close().await;
         }
         if let Some(tid) = target_id {
-            // best-effort close (Python try/except: pass)
+            // best-effort close; errors swallowed.
             let _ = self.tabs.close_tab(&tid).await;
         }
     }
 
-    /// `SubagentMux._bind_watcher`: elimination binding. First unbound chimera
-    /// session -> "main" (the shim's main tab); each later unbound session -> the
-    /// next spawned sub, in arrival order, via /control/bind.
+    /// Elimination binding. First unbound chimera session -> "main" (the shim's main
+    /// tab); each later unbound session -> the next spawned sub, in arrival order,
+    /// via /control/bind.
     async fn bind_watcher(self: Arc<Self>, stop: Arc<StopFlag>) {
         while !stop.is_set() {
             let data = self.ctrl_get("/control/sessions").await;
@@ -404,9 +373,8 @@ impl SubagentMux {
         }
     }
 
-    /// `SubagentMux.close`: cancel run tasks, close every SubProvider, close the
-    /// tab factory. (The Python also closed an aiohttp session; here reqwest's
-    /// client needs no explicit close.) All best-effort.
+    /// Cancel run tasks, close every SubProvider, close the tab factory. All
+    /// best-effort.
     async fn close(&self) {
         for (_, handle) in self.sub_tasks.lock().expect("sub_tasks poisoned").drain() {
             handle.abort();
@@ -419,30 +387,27 @@ impl SubagentMux {
     }
 }
 
-/// `SubagentMux._log_event`: progress trace for the operator; the model collects
-/// the real result via repo_await. Mirrors the Python `name or type(ev).__name__`.
+/// Progress trace for the operator; the model collects the real result via
+/// repo_await.
 fn log_event(aid: &str, ev: &StreamEvent) {
     println!("[mux:{aid}] {}", ev.name());
 }
 
 // ===========================================================================
-// SubProvider — direct port of subprovider.py
+// SubProvider
 // ===========================================================================
 
-/// Terminal capsule fields produced by `SubProvider::run` (the dict the Python
-/// returned). Only the fields the mux reads are kept first-class; `detail`/`turns`
-/// ride in the result dict in Python but aren't read by the mux capsule, so they
-/// are dropped here (matching the consumed surface).
+/// Terminal capsule fields produced by `SubProvider::run`. Only the fields the mux
+/// reads are kept.
 struct RunResult {
     status: String,
     summary: String,
     files_touched: Vec<String>,
 }
 
-/// `SubProvider` (subprovider.py) — drives ONE ChatGPT tab/conversation to
-/// completion of ONE task.
+/// Drives ONE ChatGPT tab/conversation to completion of ONE task.
 ///
-/// Each SubProvider owns its OWN CDPClient (page socket), ChatSurface, WS tap, and
+/// Each SubProvider owns its OWN CdpClient (page socket), ChatSurface, WS tap, and
 /// queue — so two subagents' WS token streams physically cannot cross-talk.
 pub struct SubProvider {
     cfg: ShadowConfig,
@@ -457,12 +422,11 @@ pub struct SubProvider {
     chat: AsyncMutex<Option<ChatSurface>>,
     tap: AsyncMutex<Option<WsTap>>,
     files: Mutex<HashSet<String>>,
-    /// "spawning" | "running" | terminal status; read by the mux's `_live`.
+    /// "spawning" | "running" | terminal status; read by the mux's `live`.
     status: Mutex<String>,
 }
 
 impl SubProvider {
-    /// `SubProvider.__init__`.
     fn new(
         cfg: ShadowConfig,
         agent_id: String,
@@ -501,10 +465,8 @@ impl SubProvider {
         *self.status.lock().expect("status poisoned") = s.to_string();
     }
 
-    /// `SubProvider.attach`: bind a page socket to this tab, arm taps + overrides
-    /// BEFORE navigating, land on a fresh thread pinned to the subagent
-    /// model/effort. (Python returns the conversation id once the first message
-    /// lands — always None here, so we return ().)
+    /// Bind a page socket to this tab, arm taps + overrides BEFORE navigating, land
+    /// on a fresh thread pinned to the subagent model/effort.
     async fn attach(&self) -> anyhow::Result<()> {
         let cdp = Arc::new(
             CdpClient::for_target(
@@ -517,13 +479,13 @@ impl SubProvider {
         );
         let chat = ChatSurface::new(Arc::clone(&cdp), self.cfg.clone());
 
-        // The token tap drains into this channel; `_drive` reads it as the "ws" arm.
+        // The token tap drains into this channel; `drive` reads it as the "ws" arm.
         let (tx, rx) = mpsc::unbounded_channel::<WsItem>();
         let mut tap = WsTap::new(Arc::clone(&cdp), tx);
         tap.start().await?; // Network.enable + subscribe frames, before navigate.
 
         // Auto streams via the invisible WS handoff; pin a thinking lane so the turn
-        // streams inline through the tap (see provider._ensure).
+        // streams inline through the tap.
         let model = self
             .model
             .clone()
@@ -553,9 +515,9 @@ impl SubProvider {
         Ok(())
     }
 
-    /// `SubProvider.run`: inject the subagent preamble+task, drive to a terminal
-    /// state, return a capsule. Emits origin-tagged events via `on_event` as work
-    /// streams. The server-events tail runs concurrently and feeds the same queue.
+    /// Inject the subagent preamble+task, drive to a terminal state, return a
+    /// capsule. Emits origin-tagged events via `on_event` as work streams. The
+    /// server-events tail runs concurrently and feeds the same queue.
     async fn run<F>(&self, on_event: F) -> anyhow::Result<RunResult>
     where
         F: Fn(StreamEvent) + Send + Sync + 'static,
@@ -631,7 +593,7 @@ impl SubProvider {
             }
         };
 
-        // ----- finally -----
+        // ----- teardown -----
         stop.set();
         tail_task.abort();
         ws_pump.abort();
@@ -656,10 +618,10 @@ impl SubProvider {
         })
     }
 
-    /// `SubProvider._drive`: the inject -> WSTap -> v1delta -> AGENT_STATUS loop.
-    /// Returns a terminal outcome. Preserves the Python's exact control flow:
-    /// deadline/idle-stall guards, jittered poll, ws token streaming + AGENT_STATUS
-    /// parsing, block-recovery re-delivery, and the loop-break on identical re-calls.
+    /// The inject -> WSTap -> v1delta -> AGENT_STATUS loop. Returns a terminal
+    /// outcome. Control flow: deadline/idle-stall guards, jittered poll, ws token
+    /// streaming + AGENT_STATUS parsing, block-recovery re-delivery, and the
+    /// loop-break on identical re-calls.
     async fn drive<F>(
         &self,
         q: &mut mpsc::UnboundedReceiver<DriveItem>,
@@ -672,9 +634,8 @@ impl SubProvider {
         // `&F: Fn` (blanket impl), so a reference is callable directly.
         let on_event: &F = on_event.as_ref();
         let cfg = &self.cfg;
-        // Python keyed dedup on `evt.get("id")` directly; we key on its plain-string
-        // form (serde_json::Value isn't Hash). The same id always renders to the same
-        // string, so the dedup semantics are identical.
+        // Dedup keyed on the event id's plain-string form (serde_json::Value isn't
+        // Hash). The same id always renders to the same string.
         let mut seen: HashSet<String> = HashSet::new();
         let idle_timeout = cfg.subagent_idle_timeout;
         let mut answer = String::new();
@@ -729,7 +690,7 @@ impl SubProvider {
                     continue;
                 }
                 Err(_) => {
-                    // asyncio.TimeoutError branch: auto-approve a confirmation card.
+                    // poll timeout: auto-approve a confirmation card.
                     if cfg.auto_approve {
                         if let Ok(st) = self.chat_state().await {
                             if st.get("hasApprove").and_then(Value::as_bool).unwrap_or(false) {
@@ -800,8 +761,6 @@ impl SubProvider {
                                 return DriveOutcome::done_like("done", strip_status(&full));
                             }
                             Some(ref st) if st.status == "BLOCKED" => {
-                                // detail rides in the Python dict but isn't read by
-                                // the mux capsule; status+summary are what matter.
                                 return DriveOutcome::done_like("blocked", strip_status(&full));
                             }
                             Some(_) => {
@@ -822,8 +781,7 @@ impl SubProvider {
                             }
                         }
                     }
-                    // "thinking" tokens are not surfaced by SubProvider (Python
-                    // never matched a "thinking" kind in _drive).
+                    // "thinking" tokens are not surfaced by SubProvider.
                 }
                 DriveItem::Server(evt) => {
                     let eid = evt.get("id").cloned().unwrap_or(Value::Null);
@@ -892,7 +850,7 @@ impl SubProvider {
                             summary,
                         });
                     }
-                    // signature = tool + "|" + (str(args) if args else "")
+                    // signature = tool + "|" + (rendered args, or "" if none).
                     let sig = format!(
                         "{tool}|{}",
                         if args.is_empty() {
@@ -975,7 +933,7 @@ impl SubProvider {
         }
     }
 
-    /// `SubProvider.close`: tear down the page socket. Best-effort.
+    /// Tear down the page socket. Best-effort.
     async fn close(&self) {
         if let Some(cdp) = self.cdp.lock().await.take() {
             cdp.close().await;
@@ -1016,23 +974,21 @@ enum DriveItem {
 }
 
 // ===========================================================================
-// stream_events.py — the origin-tagged StreamEvent variants the mux fans in.
+// The origin-tagged StreamEvent variants the mux fans in.
 // ===========================================================================
 
-/// `TextEvent` — a chunk of user-visible answer text.
+/// A chunk of user-visible answer text.
 ///
-/// The payload fields on these three event structs are write-only within the
-/// ported surface: the Python constructs them and hands them to the idare TUI
-/// (`idare.ui.stream_events`), which is OUTSIDE this port. Within the shadow
-/// package only `getattr(ev, "name", ...)` is read (subagent_mux.py:182 — the
-/// operator trace), which `StreamEvent::name` mirrors. The fields stay so the
-/// emitted events carry the same data the Python's did.
+/// The payload fields on these three event structs are write-only here: the events
+/// are emitted to the (external, unported) operator TUI, and within this module
+/// only `StreamEvent::name` is read for the operator trace. The fields stay so the
+/// emitted events carry the full data.
 #[allow(dead_code)] // consumed by the unported TUI; see struct docs
 struct TextEvent {
     content: String,
 }
 
-/// `ToolCallEvent` — a tool invocation echoed from the server feed.
+/// A tool invocation echoed from the server feed.
 #[allow(dead_code)] // call_id/arguments consumed by the unported TUI; see TextEvent docs
 struct ToolCallEvent {
     call_id: String,
@@ -1040,7 +996,7 @@ struct ToolCallEvent {
     arguments: Value,
 }
 
-/// `ToolResultEvent` — the server-confirmed outcome of a tool call.
+/// The server-confirmed outcome of a tool call.
 #[allow(dead_code)] // consumed by the unported TUI; see TextEvent docs
 struct ToolResultEvent {
     call_id: String,
@@ -1048,10 +1004,8 @@ struct ToolResultEvent {
     content: String,
 }
 
-/// The `StreamEvent` union the SubProvider emits. Carries a dynamic `origin` tag
-/// (`_tag(ev, origin)` in the Python; the TUI reads it with
-/// `getattr(ev, "origin", None)`). Only the variants SubProvider actually emits
-/// are modeled.
+/// The union the SubProvider emits. Carries a dynamic `origin` tag (read by the
+/// TUI). Only the variants SubProvider actually emits are modeled.
 #[allow(dead_code)] // variant payloads are consumed by the unported TUI; see TextEvent docs
 enum StreamEvent {
     Text(TextEvent),
@@ -1060,8 +1014,8 @@ enum StreamEvent {
 }
 
 impl StreamEvent {
-    /// `getattr(ev, "name", None) or type(ev).__name__` — for the operator trace.
-    /// A ToolCall carries a `name`; the others fall back to their type name.
+    /// For the operator trace: a ToolCall carries a `name`; the others fall back to
+    /// their type name.
     fn name(&self) -> String {
         match self {
             StreamEvent::Text(_) => "TextEvent".to_string(),
@@ -1073,25 +1027,25 @@ impl StreamEvent {
 
 /// Origin tag is attached at the point of emission; we keep the event opaque to
 /// the mux (it only logs `name()`), so the origin is threaded through the caller
-/// rather than stored on the struct. Mirrors `_tag(ev, origin)` returning `ev`.
+/// rather than stored on the struct.
 fn tag(ev: StreamEvent, _origin: &str) -> StreamEvent {
-    // The Python stamps `ev.origin = origin` for the TUI fan-in; this off-codex
-    // mux only logs the event name, so the tag is a no-op pass-through here.
+    // This off-codex mux only logs the event name, so the tag is a no-op
+    // pass-through here.
     ev
 }
 
 // ===========================================================================
-// chat.py — status sentinel + recovery messages (load-bearing strings).
+// Status sentinel + recovery messages (load-bearing strings).
 // ===========================================================================
 
-/// `parse_status` result: status (CONTINUE/DONE/BLOCKED) + trailing detail.
+/// Parsed status (CONTINUE/DONE/BLOCKED) + trailing detail.
 struct StatusSentinel {
     status: String,
     #[allow(dead_code)]
     detail: String,
 }
 
-/// `parse_status`: return the LAST `<<<AGENT_STATUS: ...>>>` sentinel, or None.
+/// Return the LAST `<<<AGENT_STATUS: ...>>>` sentinel, or None.
 fn parse_status(text: &str) -> Option<StatusSentinel> {
     let re = status_regex();
     let mut last: Option<StatusSentinel> = None;
@@ -1109,13 +1063,13 @@ fn parse_status(text: &str) -> Option<StatusSentinel> {
     last
 }
 
-/// `strip_status`: remove every sentinel and right-strip. Mirrors `_STATUS_RE.sub`.
+/// Remove every sentinel and right-strip.
 fn strip_status(text: &str) -> String {
     let re = status_regex();
     re.replace_all(text, "").trim_end().to_string()
 }
 
-/// `_STATUS_RE = <<<\s*AGENT_STATUS:\s*(CONTINUE|DONE|BLOCKED)([^>]*)>>>` (case-i).
+/// `<<<\s*AGENT_STATUS:\s*(CONTINUE|DONE|BLOCKED)([^>]*)>>>` (case-insensitive).
 fn status_regex() -> &'static regex::Regex {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -1125,8 +1079,8 @@ fn status_regex() -> &'static regex::Regex {
     })
 }
 
-/// `block_recovery_msg`: re-deliver server-confirmed tool outcomes after OpenAI's
-/// post-execution moderation withheld them from the model. Copied verbatim.
+/// Re-deliver server-confirmed tool outcomes after OpenAI's post-execution
+/// moderation withheld them from the model.
 fn block_recovery_msg(tools: &[ToolInfo]) -> String {
     let lines: Vec<String> = tools
         .iter()
@@ -1154,7 +1108,7 @@ on a retry). Continue from here.",
     )
 }
 
-/// `loop_recovery_msg`: break an in-turn retry loop. Copied verbatim.
+/// Break an in-turn retry loop.
 fn loop_recovery_msg(tool: &str, count: u32, tools: &[ToolInfo]) -> String {
     let lines: Vec<String> = tools
         .iter()
@@ -1187,11 +1141,10 @@ repeating the same call is not."
 }
 
 // ===========================================================================
-// chat.py — ChatSurface (the brittle DOM bits) + model/effort overrides.
+// ChatSurface — the brittle DOM bits + model/effort overrides.
 // ===========================================================================
 
-/// `ChatSurface`: all ChatGPT-specific selectors + DOM interaction. Each method is
-/// a faithful port; the embedded JS snippets are copied byte-for-byte.
+/// All ChatGPT-specific selectors + DOM interaction.
 struct ChatSurface {
     cdp: Arc<CdpClient>,
     cfg: ShadowConfig,
@@ -1202,12 +1155,12 @@ impl ChatSurface {
         Self { cdp, cfg }
     }
 
-    /// `ChatSurface.state`: one round-trip read of turn state.
+    /// One round-trip read of turn state.
     async fn state(&self) -> anyhow::Result<Value> {
         Ok(self.cdp.eval(STATE_JS, 30.0).await?)
     }
 
-    /// `ChatSurface.inject`: focus the composer, type text, send (click or Enter).
+    /// Focus the composer, type text, send (click or Enter).
     async fn inject(&self, text: &str) -> anyhow::Result<()> {
         self.cdp.eval(FOCUS_JS, 30.0).await?;
         self.cdp.insert_text(text).await?;
@@ -1233,14 +1186,14 @@ impl ChatSurface {
         Ok(())
     }
 
-    /// `ChatSurface.approve`: click a short Approve/Confirm card if present.
+    /// Click a short Approve/Confirm card if present.
     async fn approve(&self) -> anyhow::Result<Value> {
         Ok(self.cdp.eval(CLICK_APPROVE_JS, 30.0).await?)
     }
 
-    /// `ChatSurface.stop`: click stop, then wait for a STABLE not-generating +
-    /// composerReady across two reads (re-clicking stop periodically). Returns true
-    /// once stably stopped+ready, false on timeout.
+    /// Click stop, then wait for a STABLE not-generating + composerReady across two
+    /// reads (re-clicking stop periodically). Returns true once stably stopped+ready,
+    /// false on timeout.
     async fn stop(&self, timeout: f64) -> bool {
         let _ = self.cdp.eval(CLICK_STOP_JS, 30.0).await;
         let deadline = Instant::now() + Duration::from_secs_f64(timeout);
@@ -1273,7 +1226,7 @@ impl ChatSurface {
         false
     }
 
-    /// `ChatSurface._wait_composer`: poll for the composer instead of a blind sleep.
+    /// Poll for the composer instead of a blind sleep.
     async fn wait_composer(&self, timeout: f64) -> bool {
         let deadline = Instant::now() + Duration::from_secs_f64(timeout);
         while Instant::now() < deadline {
@@ -1287,7 +1240,7 @@ impl ChatSurface {
         false
     }
 
-    /// `ChatSurface.available_models`: live [{slug,title}] from /backend-api/models.
+    /// Live [{slug,title}] from /backend-api/models.
     async fn available_models(&self) -> Vec<Value> {
         self.cdp
             .eval(JS_MODELS, 30.0)
@@ -1297,8 +1250,8 @@ impl ChatSurface {
             .unwrap_or_default()
     }
 
-    /// `ChatSurface.resolve_slug`: map a real slug / friendly spec to a live slug.
-    /// Faithful port of the lane+version parse with loose fallback.
+    /// Map a real slug / friendly spec to a live slug (lane+version parse with loose
+    /// fallback).
     async fn resolve_slug(&self, spec: Option<&str>) -> Option<String> {
         let spec = match spec {
             Some(s) if !s.is_empty() => s,
@@ -1340,8 +1293,8 @@ impl ChatSurface {
         Some(spec.to_string()) // let ChatGPT ignore/reject rather than swap.
     }
 
-    /// `ChatSurface.set_overrides`: force model/effort (+ optional gizmo/no_history)
-    /// on every subsequent turn, persisted in localStorage. Resolves friendly specs.
+    /// Force model/effort (+ optional gizmo/no_history) on every subsequent turn,
+    /// persisted in localStorage. Resolves friendly specs.
     async fn set_overrides(
         &self,
         model: Option<&str>,
@@ -1379,7 +1332,6 @@ impl ChatSurface {
     }
 }
 
-/// `_LANES` from chat.py.
 const LANES: &[&str] = &["instant", "thinking", "pro", "auto"];
 
 /// `resolve_effort`: map an effort spec/alias to a backend value; unknown -> None.
@@ -2428,7 +2380,6 @@ const STATE_JS: &str = r#"
 })()
 "#;
 
-/// `FOCUS_JS` from chat.py.
 const FOCUS_JS: &str = r#"
 (() => {
   const el = document.querySelector('#prompt-textarea')
@@ -2439,7 +2390,6 @@ const FOCUS_JS: &str = r#"
 })()
 "#;
 
-/// `CLICK_SEND_JS` from chat.py.
 const CLICK_SEND_JS: &str = r#"
 (() => {
   const b = document.querySelector('[data-testid="send-button"]')
@@ -2449,7 +2399,6 @@ const CLICK_SEND_JS: &str = r#"
 })()
 "#;
 
-/// `CLICK_STOP_JS` from chat.py.
 const CLICK_STOP_JS: &str = r#"
 (() => {
   const b = document.querySelector('[data-testid="stop-button"]')
@@ -2459,7 +2408,6 @@ const CLICK_STOP_JS: &str = r#"
 })()
 "#;
 
-/// `CLICK_APPROVE_JS` from chat.py.
 const CLICK_APPROVE_JS: &str = r#"
 (() => {
   const b = [...document.querySelectorAll('button')].find(b => {
@@ -2471,7 +2419,6 @@ const CLICK_APPROVE_JS: &str = r#"
 })()
 "#;
 
-/// `JS_COMPOSER_READY` from chat.py.
 const JS_COMPOSER_READY: &str = r#"(()=>!!(document.querySelector('#prompt-textarea')||document.querySelector('div[contenteditable="true"]')||document.querySelector('textarea')))()"#;
 
 /// `JS_MODELS` from chat.py — live [{slug,title}] from /backend-api/models.

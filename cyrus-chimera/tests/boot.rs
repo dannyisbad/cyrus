@@ -3,8 +3,6 @@
 //! ephemeral port, asserting the behaviors verified live against the Node
 //! original (2026-06-10).
 //!
-//! Original behaviors under test: repo-agent-mcp/src/index.ts (private original)
-//!
 //! Multi-thread runtime flavor is REQUIRED: the wire-layer adapters bridge the
 //! sync router traits onto the async state/oauth/mcp modules with
 //! `block_in_place`.

@@ -1,8 +1,6 @@
 //! Live content tap: subscribe to ChatGPT's WebSocket frames via CDP's Network
 //! domain (and the inline-SSE fetch tee), feed payloads to the v1 delta parser.
 //!
-//! Source: idare/shadow/wstap.py (private original)
-//!
 //! Subscribes to `Network.webSocketFrameReceived` (browser-protocol level, so it
 //! catches ChatGPT's socket however it's opened — no fragile page injection),
 //! pulls the `conversation-turn-stream` items out of each frame, and feeds their
@@ -23,8 +21,7 @@ use crate::cdp::CdpClient;
 use crate::v1delta::{Event, V1DeltaParser};
 
 /// Callback invoked for every forwarded parser event: `(kind, value)` where
-/// `kind` is one of "token" | "thinking" | "turn_complete". Mirrors the Python
-/// `on_event: Callable[[str, str], None]`.
+/// `kind` is one of "token" | "thinking" | "turn_complete".
 pub type OnEvent = Arc<dyn Fn(&str, &str) + Send + Sync + 'static>;
 
 /// Mutable per-turn state shared with the CDP event handlers. The handlers fire
@@ -52,7 +49,6 @@ impl TapState {
     }
 }
 
-/// See `WSTap` in wstap.py.
 pub struct WsTap {
     cdp: Arc<CdpClient>,
     on_event: OnEvent,
@@ -61,7 +57,6 @@ pub struct WsTap {
 }
 
 impl WsTap {
-    /// `WSTap.__init__`.
     pub fn new(cdp: Arc<CdpClient>, on_event: OnEvent) -> Self {
         Self {
             cdp,
@@ -71,12 +66,10 @@ impl WsTap {
         }
     }
 
-    /// `WSTap.start`.
-    ///
     /// Enables the Network domain and subscribes to WS frames, then arms the
     /// inline-SSE fetch tee (`Runtime.addBinding("__shadowStream")` +
     /// `Runtime.bindingCalled`). The binding step is best-effort: any failure is
-    /// swallowed, matching the Python `try/except: pass`.
+    /// swallowed.
     pub async fn start(&mut self) -> anyhow::Result<()> {
         if self.started {
             return Ok(());
@@ -118,7 +111,7 @@ impl WsTap {
         Ok(())
     }
 
-    /// `WSTap.reset` — fresh parser state for a new turn.
+    /// Fresh parser state for a new turn.
     pub fn reset(&self) {
         let mut state = self.state.lock().expect("WsTap state mutex poisoned");
         state.parser = V1DeltaParser::default();
@@ -127,8 +120,6 @@ impl WsTap {
     }
 }
 
-/// `WSTap._emit`.
-///
 /// Forward parser events. Suppress a turn_complete that arrives with no tokens
 /// this turn — that's the *inactive* transport's spurious complete (e.g. the SSE
 /// side of a WS-handoff turn). A real answer always streams visible tokens (incl.
@@ -174,7 +165,6 @@ fn emit(state: &Mutex<TapState>, on_event: &OnEvent, events: Vec<Event>) {
     }
 }
 
-/// `WSTap._binding`.
 fn handle_binding(state: &Mutex<TapState>, on_event: &OnEvent, params: &Value) {
     if params.get("name").and_then(Value::as_str) != Some("__shadowStream") {
         return;
@@ -183,7 +173,7 @@ fn handle_binding(state: &Mutex<TapState>, on_event: &OnEvent, params: &Value) {
         Some(p) => p,
         None => return,
     };
-    // feed the inline-SSE parser; swallow any error (Python `try/except: pass`).
+    // feed the inline-SSE parser; swallow any error.
     let events = {
         let mut s = state.lock().expect("WsTap state mutex poisoned");
         s.sse_parser.feed(payload)
@@ -191,7 +181,6 @@ fn handle_binding(state: &Mutex<TapState>, on_event: &OnEvent, params: &Value) {
     emit(state, on_event, events);
 }
 
-/// `WSTap._frame`.
 fn handle_frame(state: &Mutex<TapState>, on_event: &OnEvent, params: &Value) {
     let data = params
         .get("response")

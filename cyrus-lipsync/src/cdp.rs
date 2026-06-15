@@ -1,24 +1,18 @@
 //! Minimal async Chrome DevTools Protocol client (one page socket per tab).
 //!
-//! Source: idare/shadow/cdp.py (private original)
+//! Connect to a page target, send id-correlated commands with a timeout,
+//! evaluate JS, synthesize input, navigate, register event handlers, and
+//! reconnect (by target_id) if the socket drops. Uses tokio-tungstenite for the
+//! page WebSocket and a tiny raw-TCP HTTP/1.1 GET for the `{base}/json`
+//! target-discovery endpoint (avoids pulling in a full HTTP client crate — the
+//! endpoint is a localhost JSON array).
 //!
-//! Port of the Python `CDPClient`: connect to a page target, send id-correlated
-//! commands with a timeout, evaluate JS, synthesize input, navigate, register
-//! event handlers, and reconnect (by target_id) if the socket drops.
-//!
-//! The Python used aiohttp; this uses tokio-tungstenite for the page WebSocket
-//! and a tiny raw-TCP HTTP/1.1 GET for the `{base}/json` target-discovery
-//! endpoint (avoids pulling in a full HTTP client crate — the endpoint is a
-//! localhost JSON array).
-//!
-//! Hazards preserved from the original:
-//!   - aiohttp set `max_msg_size=0` to disable its 4MB frame cap (CDP DOM
-//!     payloads are large). Here `WebSocketConfig::max_message_size` /
-//!     `max_frame_size` are set to `None` (unbounded) so large frames are never
-//!     truncated.
+//! Invariants:
+//!   - `WebSocketConfig::max_message_size` / `max_frame_size` are `None`
+//!     (unbounded): CDP DOM payloads are large, so a frame cap would truncate
+//!     them.
 //!   - On socket close, every pending request future is failed with
-//!     `CdpError::SocketClosed` so callers never hang (mirrors the read loop's
-//!     `finally` that resolves all pending futures).
+//!     `CdpError::SocketClosed` so callers never hang.
 //!   - `eval` surfaces `exceptionDetails` as an error and returns
 //!     `result.result.value` (`returnByValue:true`, `awaitPromise:true`).
 //!   - `for_target` attaches to a SPECIFIC page target by id (one socket per
@@ -38,7 +32,7 @@ use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 
-/// Mirror of the Python `CDPError` (a `RuntimeError` subclass).
+/// Errors surfaced by the CDP client.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum CdpError {
     /// A CDP command came back with an `error` object, or `eval` saw
@@ -64,10 +58,9 @@ type Result<T> = std::result::Result<T, CdpError>;
 /// An event handler: receives the CDP event's `params` object.
 ///
 /// Handlers are stored as reference-counted closures. They are called
-/// synchronously from the read loop (like the Python, which invokes
-/// `h(params)` inline), so they must not block. Panics/errors inside a handler
-/// are isolated per call (the read loop keeps going), matching the Python
-/// `try/except: pass`. `Arc` (not `Box`) so callers can build the closure with
+/// synchronously from the read loop (invoked inline), so they must not block.
+/// Panics/errors inside a handler are isolated per call (the read loop keeps
+/// going). `Arc` (not `Box`) so callers can build the closure with
 /// `Arc::new(...)` — the shape `wstap.rs` already relies on.
 pub type EventHandler = Arc<dyn Fn(Value) + Send + Sync + 'static>;
 
@@ -92,13 +85,13 @@ type WsSink = futures::stream::SplitSink<
     Message,
 >;
 
-/// One CDP page socket. See `CDPClient` in cdp.py.
+/// One CDP page socket.
 pub struct CdpClient {
     host: String,
     port: u16,
     tab_match: String,
 
-    /// Monotonic message-id counter (`self._id` in the Python).
+    /// Monotonic message-id counter.
     next_id: Arc<AtomicU64>,
     /// Pending futures + event handler registry, shared with the read loop.
     shared: Arc<Shared>,
@@ -114,7 +107,7 @@ pub struct CdpClient {
 }
 
 impl CdpClient {
-    /// Construct an unconnected client. Mirrors `CDPClient.__init__`.
+    /// Construct an unconnected client.
     pub fn new(host: impl Into<String>, port: u16, tab_match: impl Into<String>) -> Self {
         Self {
             host: host.into(),
@@ -132,19 +125,19 @@ impl CdpClient {
         }
     }
 
-    /// Convenience constructor matching the Python defaults
+    /// Convenience constructor with the default target
     /// (`host="127.0.0.1", port=9222, tab_match="chatgpt.com"`).
     pub fn with_defaults() -> Self {
         Self::new("127.0.0.1", 9222, "chatgpt.com")
     }
 
-    /// `http://{host}:{port}` (the `base` property).
+    /// `http://{host}:{port}`.
     pub fn base(&self) -> String {
         format!("http://{}:{}", self.host, self.port)
     }
 
     /// Register a callback for a CDP event (e.g. `"Network.webSocketFrameReceived"`
-    /// or `"Runtime.bindingCalled"`). Mirrors `CDPClient.on`.
+    /// or `"Runtime.bindingCalled"`).
     ///
     /// Synchronous (no `.await`) and takes an `Arc<dyn Fn(Value) + Send + Sync>`,
     /// matching the call sites in `wstap.rs`
@@ -159,7 +152,7 @@ impl CdpClient {
             .push(handler);
     }
 
-    /// Pick the first matching page target and open its socket. `CDPClient.connect`.
+    /// Pick the first matching page target and open its socket.
     pub async fn connect(&self) -> Result<()> {
         let target = self.pick_target().await?;
         let id = target.get("id").and_then(Value::as_str).map(str::to_owned);
@@ -170,7 +163,7 @@ impl CdpClient {
 
     /// Attach to a SPECIFIC page target by id (one socket per tab — the basis of
     /// per-subagent WS isolation). Reconnect uses `target_id`, never
-    /// first-URL-match. Mirrors `CDPClient.for_target`.
+    /// first-URL-match.
     pub async fn for_target(
         host: impl Into<String>,
         port: u16,
@@ -187,7 +180,7 @@ impl CdpClient {
     }
 
     /// GET `{base}/json` and return the entry whose `id` matches and which has a
-    /// `webSocketDebuggerUrl`. Mirrors `_find_target_by_id`.
+    /// `webSocketDebuggerUrl`.
     async fn find_target_by_id(&self, target_id: &str) -> Result<Value> {
         let targets = self.fetch_targets().await?;
         for t in targets {
@@ -206,7 +199,7 @@ impl CdpClient {
     }
 
     /// GET `{base}/json` and return the first `type=="page"` target whose URL
-    /// contains `tab_match` and which has a `webSocketDebuggerUrl`. `_pick_target`.
+    /// contains `tab_match` and which has a `webSocketDebuggerUrl`.
     async fn pick_target(&self) -> Result<Value> {
         let targets = self.fetch_targets().await?;
         for t in targets {
@@ -241,8 +234,8 @@ impl CdpClient {
     }
 
     /// Open the page WebSocket, spawn the read loop, and `Runtime.enable`.
-    /// Mirrors `_open_ws` (incl. the `max_msg_size=0` cap lift via
-    /// `WebSocketConfig` with unbounded message/frame sizes).
+    /// The frame cap is lifted via `WebSocketConfig` with unbounded
+    /// message/frame sizes (CDP DOM payloads are large).
     async fn open_ws(&self) -> Result<()> {
         let ws_url = self
             .target
@@ -253,7 +246,7 @@ impl CdpClient {
             .map(str::to_owned)
             .ok_or_else(|| CdpError::Transport("target has no webSocketDebuggerUrl".into()))?;
 
-        // max_msg_size=0 in aiohttp == no cap. tokio-tungstenite: None == unbounded.
+        // None == unbounded: no frame cap, so large CDP frames are never truncated.
         let config = WebSocketConfig {
             max_message_size: None,
             max_frame_size: None,
@@ -273,17 +266,16 @@ impl CdpClient {
         let handle = tokio::spawn(read_loop(stream, shared));
         *self.reader.lock().await = Some(handle);
 
-        // Like the Python, enable the Runtime domain immediately on open.
+        // Enable the Runtime domain immediately on open.
         self.send("Runtime.enable", None).await?;
         Ok(())
     }
 
-    /// Default per-command timeout (seconds), matching the Python `send`'s
-    /// `timeout: float = 30.0`.
+    /// Default per-command timeout (seconds).
     const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
 
     /// Send a CDP command and await its id-correlated response, using the
-    /// default 30s timeout. Mirrors `CDPClient.send` with its default timeout.
+    /// default 30s timeout.
     ///
     /// The two-argument shape matches the call sites in `wstap.rs` /
     /// `tab_factory.rs` (`cdp.send("Network.enable", None)`). For a custom
@@ -293,8 +285,7 @@ impl CdpClient {
             .await
     }
 
-    /// Send a CDP command with an explicit timeout (seconds). The full form of
-    /// `CDPClient.send(method, params, timeout)`.
+    /// Send a CDP command with an explicit timeout (seconds).
     pub async fn send_timeout(
         &self,
         method: &str,
@@ -336,7 +327,7 @@ impl CdpClient {
             Ok(Ok(res)) => res,
             // Sender dropped without sending (read loop ended without resolving).
             Ok(Err(_)) => Err(CdpError::SocketClosed),
-            // Timed out: remove the pending entry, mirror the Python message.
+            // Timed out: remove the pending entry.
             Err(_) => {
                 self.shared.pending.lock().await.remove(&mid);
                 Err(CdpError::Timeout(method.to_string()))
@@ -346,7 +337,6 @@ impl CdpClient {
 
     /// `Runtime.evaluate` with `returnByValue:true, awaitPromise:true`; surfaces
     /// `exceptionDetails` as an error and returns `result.result.value`.
-    /// Mirrors `CDPClient.eval`.
     pub async fn eval(&self, expression: &str, timeout: f64) -> Result<Value> {
         let result = self
             .send_timeout(
@@ -375,14 +365,14 @@ impl CdpClient {
             .unwrap_or(Value::Null))
     }
 
-    /// `Input.insertText`. Mirrors `CDPClient.insert_text`.
+    /// `Input.insertText`.
     pub async fn insert_text(&self, text: &str) -> Result<()> {
         self.send("Input.insertText", Some(json!({ "text": text })))
             .await?;
         Ok(())
     }
 
-    /// Dispatch a keyDown then keyUp for the given key. Mirrors `CDPClient.key`.
+    /// Dispatch a keyDown then keyUp for the given key.
     pub async fn key(&self, key: &str, code: &str, vk: i64) -> Result<()> {
         for kind in ["keyDown", "keyUp"] {
             self.send(
@@ -400,7 +390,7 @@ impl CdpClient {
         Ok(())
     }
 
-    /// `Page.navigate`. Mirrors `CDPClient.navigate`.
+    /// `Page.navigate`.
     pub async fn navigate(&self, url: &str) -> Result<()> {
         self.send("Page.navigate", Some(json!({ "url": url })))
             .await?;
@@ -408,7 +398,7 @@ impl CdpClient {
     }
 
     /// Expose `window.<name>(str)` in the page; calls surface as
-    /// `Runtime.bindingCalled` events. Mirrors `CDPClient.add_binding`.
+    /// `Runtime.bindingCalled` events.
     pub async fn add_binding(&self, name: &str) -> Result<()> {
         self.send("Runtime.addBinding", Some(json!({ "name": name })))
             .await?;
@@ -418,7 +408,7 @@ impl CdpClient {
     /// Install JS that runs at document-start on every future navigation/reload
     /// (`Page.enable` then `Page.addScriptToEvaluateOnNewDocument`). Survives
     /// navigations for the life of this session; re-call after `reconnect`.
-    /// Mirrors `CDPClient.add_init_script` (returns the CDP result object).
+    /// Returns the CDP result object.
     pub async fn add_init_script(&self, source: &str) -> Result<Value> {
         self.send("Page.enable", None).await?;
         self.send(
@@ -428,9 +418,8 @@ impl CdpClient {
         .await
     }
 
-    /// `Network.enable`. Not a named method on the Python class, but `Network`
-    /// is one of the domains the brief lists; callers (wstap) enable it via the
-    /// generic `send`. Provided here as a convenience wrapper.
+    /// `Network.enable`. A convenience wrapper over the generic `send`; callers
+    /// (wstap) enable this domain to receive `Network.*` events.
     pub async fn enable_network(&self) -> Result<()> {
         self.send("Network.enable", None).await?;
         Ok(())
@@ -438,7 +427,7 @@ impl CdpClient {
 
     /// Tear down the current socket+reader and re-open, re-resolving the target
     /// by `target_id` (falling back to a fresh URL-match pick only if no id is
-    /// bound). Mirrors `CDPClient.reconnect`.
+    /// bound).
     pub async fn reconnect(&self) -> Result<()> {
         self.teardown_socket().await;
 
@@ -451,9 +440,8 @@ impl CdpClient {
         self.open_ws().await
     }
 
-    /// Close the socket and reader. Mirrors `CDPClient.close` (aiohttp also
-    /// closed the session; here there is no persistent HTTP session to close —
-    /// each `{base}/json` GET is a one-shot connection).
+    /// Close the socket and reader. There is no persistent HTTP session to close
+    /// — each `{base}/json` GET is a one-shot connection.
     pub async fn close(&self) {
         self.teardown_socket().await;
     }
@@ -472,9 +460,8 @@ impl CdpClient {
     }
 }
 
-/// Read loop: resolve id-correlated responses and dispatch events. Mirrors
-/// `_read_loop`, including the `finally` that fails every still-pending future
-/// when the socket closes.
+/// Read loop: resolve id-correlated responses and dispatch events, failing
+/// every still-pending future when the socket closes.
 async fn read_loop<S>(mut stream: S, shared: Arc<Shared>)
 where
     S: futures::Stream<
@@ -488,7 +475,7 @@ where
             Err(_) => break,
         };
 
-        // Only TEXT frames carry CDP JSON (Python skips non-TEXT).
+        // Only TEXT frames carry CDP JSON.
         let text = match msg {
             Message::Text(t) => t,
             Message::Close(_) => break,
@@ -497,7 +484,7 @@ where
 
         let data: Value = match serde_json::from_str(&text) {
             Ok(v) => v,
-            Err(_) => continue, // malformed JSON ignored, like the Python
+            Err(_) => continue, // malformed JSON ignored
         };
 
         // Response to a command (`id` present) vs. an event (`method` present).
@@ -512,7 +499,7 @@ where
                         .to_string();
                     let _ = tx.send(Err(CdpError::Protocol(message)));
                 } else {
-                    // Python resolves with data.get("result") (may be absent).
+                    // Resolve with data.get("result") (may be absent).
                     let result = data.get("result").cloned().unwrap_or(Value::Null);
                     let _ = tx.send(Ok(result));
                 }
@@ -527,7 +514,7 @@ where
             // BEFORE invoking them. Handlers are `Arc` (cheap to clone), and this
             // avoids holding the std mutex across a handler that might re-enter
             // `on()` (which would self-deadlock a std mutex). Handlers run inline
-            // and synchronously, like the Python `h(params)`.
+            // and synchronously.
             let handlers: Vec<EventHandler> = {
                 let guard = shared
                     .handlers
@@ -536,8 +523,7 @@ where
                 guard.get(method).cloned().unwrap_or_default()
             };
             for h in handlers {
-                // Each handler is isolated; the read loop keeps going regardless
-                // (the Python wraps each call in `try/except: pass`).
+                // Each handler is isolated; the read loop keeps going regardless.
                 h(params.clone());
             }
         }
