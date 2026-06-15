@@ -31,9 +31,9 @@ jobs:
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             cf: cloudflared-linux-arm64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            cf: cloudflared-darwin-amd64.tgz
+          # Intel mac dropped: macos-13 caps at Xcode 15.x, where codex's
+          # webrtc-sys cxx bridge fails to compile. Apple Silicon covers
+          # current Macs; revisit if an Intel build path appears.
           - os: macos-14
             target: aarch64-apple-darwin
             cf: cloudflared-darwin-arm64.tgz
