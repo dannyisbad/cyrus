@@ -13,6 +13,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      reuse_codex_from:
+        description: "Reuse the embedded codex from this release tag instead of recompiling it (e.g. v0.1.0). Empty = build codex from source. codex hasn't changed -> reuse builds in minutes."
+        required: false
+        default: ""
 
 permissions:
   contents: write   # create the release + upload assets
@@ -65,8 +70,49 @@ jobs:
           cc --version
           xcodebuild -version
 
+      # Fast path: codex hasn't changed since a prior release, so reuse the
+      # already-built copy embedded in that release's cyrus binary instead of
+      # recompiling the (huge) codex workspace. Running the old binary once
+      # self-extracts its codex to CYRUS_HOME/bin via cyrus's own extractor
+      # (extract_once in embedded.rs) — that runs in codex_command() BEFORE codex
+      # launches, so even if the launched `codex --version` hangs on the
+      # onboarding gate, the binary is already on disk. We kill it after.
+      - name: Reuse codex from a prior release (fast path)
+        if: inputs.reuse_codex_from != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          tag="${{ inputs.reuse_codex_from }}"
+          base="cyrus-${{ matrix.target }}"
+          work="$RUNNER_TEMP/reuse"
+          mkdir -p "$work" && cd "$work"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "$base.zip"
+            7z x "$base.zip" >/dev/null
+            BIN="./cyrus.exe"
+          else
+            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "$base.tar.gz"
+            tar -xzf "$base.tar.gz"
+            chmod +x ./cyrus
+            BIN="./cyrus"
+          fi
+          export CYRUS_HOME="$work/.cyrus"
+          # Launch in the background; extraction completes before codex starts, so
+          # we just need it to run far enough, then reap it (no `timeout` dep — BSD
+          # macOS doesn't ship one).
+          "$BIN" --version >/dev/null 2>&1 &
+          p=$!
+          ( sleep 30; kill -9 "$p" ) >/dev/null 2>&1 &
+          wait "$p" 2>/dev/null || true
+          codex=$(ls "$CYRUS_HOME"/bin/codex-* 2>/dev/null | head -1)
+          test -n "$codex" || { echo "codex was not extracted from $tag"; ls -la "$CYRUS_HOME"/bin 2>/dev/null || true; exit 1; }
+          echo "CODEX_BIN=$codex" >> "$GITHUB_ENV"
+          echo "reused codex from $tag: $codex"
+
       - name: Read pinned codex fork (scripts/codex.lock)
         id: codex
+        if: inputs.reuse_codex_from == ''
         run: |
           # POSIX [[:space:]], not \s: BSD sed on the macOS runners doesn't grok
           # \s, so it left a leading space in the value (url=" https://...") and
@@ -79,6 +125,7 @@ jobs:
           echo "codex fork: $url @ $sha"
 
       - name: Build pinned codex fork
+        if: inputs.reuse_codex_from == ''
         # The codex workspace is huge; its release profile (thin LTO +
         # line-tables debug, default parallelism) peaks past the runner's RAM
         # and the agent gets SIGKILLed (exit 143). Cap concurrency and strip the
@@ -95,6 +142,11 @@ jobs:
           git -C "$RUNNER_TEMP/codex" -c advice.detachedHead=false checkout "${{ steps.codex.outputs.sha }}"
           # Build from inside codex-rs so its rust-toolchain.toml is honored.
           ( cd "$RUNNER_TEMP/codex/codex-rs" && cargo build --release --bin codex )
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            echo "CODEX_BIN=$RUNNER_TEMP/codex/codex-rs/target/release/codex.exe" >> "$GITHUB_ENV"
+          else
+            echo "CODEX_BIN=$RUNNER_TEMP/codex/codex-rs/target/release/codex" >> "$GITHUB_ENV"
+          fi
 
       - name: Fetch cloudflared (embedded)
         run: |
@@ -113,18 +165,18 @@ jobs:
           esac
 
       - name: Build cyrus (single binary, embedding codex + cloudflared)
+        # No job cap here: the -j2 throttle exists only for codex's giant
+        # workspace (OOM → exit 143). The cyrus workspace is small, so let it use
+        # every core. LTO stays off / strip on for a fast, lean build.
         env:
-          CARGO_BUILD_JOBS: "2"
           CARGO_PROFILE_RELEASE_LTO: "false"
           CARGO_PROFILE_RELEASE_DEBUG: "false"
           CARGO_PROFILE_RELEASE_STRIP: "true"
         run: |
           set -eux
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            CODEX_BIN="$RUNNER_TEMP/codex/codex-rs/target/release/codex.exe"
-          else
-            CODEX_BIN="$RUNNER_TEMP/codex/codex-rs/target/release/codex"
-          fi
+          # CODEX_BIN is exported by exactly one of the two upstream steps:
+          # "Build pinned codex fork" (from source) or "Reuse codex from a prior
+          # release" (fast path). Either way it points at a real codex executable.
           test -f "$CODEX_BIN"
           CYRUS_EMBED_CODEX="$CODEX_BIN" \
           CYRUS_EMBED_CLOUDFLARED="$CF_BIN" \

@@ -714,7 +714,6 @@ fn render_failure(json: bool, opts: &SetupOptions, failed: Option<Step>, e: &any
         }
     }
     eprintln!();
-    eprintln!("Re-running `cyrus setup` is safe — it verifies and repairs, never duplicates.");
 }
 
 /// The log files that exist for a step (so we never point at a file that was

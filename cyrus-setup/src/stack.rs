@@ -174,9 +174,41 @@ fn kill_port_owner(port: u16, expect_image: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// macOS/Linux counterpart: lsof finds the listener, ps confirms it's OUR image
+// before SIGKILL. Empty port -> no-op (Ok), foreign image -> error. No lsof on
+// PATH -> no-op and let the spawn/poll below surface a real failure.
 #[cfg(not(windows))]
-fn kill_port_owner(_port: u16, _expect_image: &str) -> anyhow::Result<()> {
-    anyhow::bail!("stale stack instance on the port — stop it manually and re-run setup")
+fn kill_port_owner(port: u16, expect_image: &str) -> anyhow::Result<()> {
+    let out = match std::process::Command::new("lsof")
+        .args(["-ti", &format!("tcp:{port}"), "-sTCP:LISTEN"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Ok(()),
+    };
+    let pids: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+    for pid in pids {
+        // ps comm is the full path on macOS, the (possibly truncated) name on
+        // Linux — match on the basename either way.
+        let comm = std::process::Command::new("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        let image = comm.rsplit('/').next().unwrap_or(comm.as_str());
+        anyhow::ensure!(
+            image.contains(&expect_image.to_ascii_lowercase()),
+            "port {port} is held by a foreign process (pid {pid}) — free it and re-run setup"
+        );
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    Ok(())
 }
 
 /// Best-effort teardown of OUR chimera + lipsync (kill the cyrus-image owner of
@@ -228,7 +260,30 @@ fn kill_quick_tunnel(opts: &SetupOptions) {
 }
 
 #[cfg(not(windows))]
-fn kill_quick_tunnel(_opts: &SetupOptions) {}
+fn kill_quick_tunnel(opts: &SetupOptions) {
+    let pid_file = opts.cyrus_home().join("quick-tunnel.pid");
+    let Ok(s) = std::fs::read_to_string(&pid_file) else {
+        return;
+    };
+    let Ok(pid) = s.trim().parse::<u32>() else {
+        return;
+    };
+    let is_cf = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .to_ascii_lowercase()
+                .contains("cloudflared")
+        })
+        .unwrap_or(false);
+    if is_cf {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
+    let _ = std::fs::remove_file(&pid_file);
+}
 
 async fn poll_until<F, Fut>(what: &str, secs: u64, mut f: F) -> anyhow::Result<()>
 where

@@ -105,8 +105,8 @@ impl Step {
                  static domain for a permanent URL) or cloudflared. See docs/TUNNELING.md."
             }
             Step::Stack => {
-                "A server didn't come up, or its port is held by a non-cyrus process. \
-                 Check the logs below and free the port if needed."
+                "A local server (chimera or lipsync) didn't come up, or its port is held \
+                 by another process. Free the port and re-run setup."
             }
             Step::Connector => {
                 "The ChatGPT tab must stay logged in, and the tunnel must reach chimera. \
