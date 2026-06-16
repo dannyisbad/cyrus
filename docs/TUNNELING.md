@@ -46,15 +46,6 @@ Two shapes:
 ngrok-ephemeral (a random `*.ngrok-free.app`, no reserved domain) is used only
 if cloudflared isn't installed at all.
 
-## Why a changing URL is safe now
-
-The ChatGPT connector is keyed on the exact tunnel URL. When the URL changes,
-the old connector is stale. cyrus records every connector **it** creates in
-`~/.cyrus/connector.json` and, on a URL change, deletes **only those recorded
-ids** — never anything matched by domain. So even on a shared apex like
-`trycloudflare.com` or `ngrok-free.app`, your other, unrelated MCP connectors
-are never touched.
-
 ## Summary
 
 | Provider | URL stability | Cost | Connector churn |

@@ -51,27 +51,23 @@ terminal"* — nothing more.
 | Crate | What it is |
 |---|---|
 | `cyrus-setup` | The `cyrus` CLI: one-shot setup/repair engine (`cyrus setup`, `cyrus check`), connector automation, tunnel management. Library name: `cyrus_engine`. |
-| `cyrus-chimera` | MCP + tool-relay + OAuth server the ChatGPT connector talks to. Rust port of a private Node/TypeScript original (`repo-agent-mcp`). |
-| `cyrus-lipsync` | The `/v1/responses` shim that drives the chatgpt.com tab over CDP. Rust port of a private Python original (`idare/shadow`). |
-| `tests/differential` | Byte-diff harness that compares this port's output against the private originals (skips gracefully when you don't have them — see below). |
-| `docs/` | [TUNNELING.md](docs/TUNNELING.md) (read this), [PORT_STATUS.md](docs/PORT_STATUS.md) (port provenance + validation history). |
+| `cyrus-chimera` | MCP + tool-relay + OAuth server the ChatGPT connector talks to. |
+| `cyrus-lipsync` | The `/v1/responses` shim that drives the chatgpt.com tab over CDP. |
+| `docs/` | [TUNNELING.md](docs/TUNNELING.md) — stable-tunnel setup. |
 
 **One binary ships the whole system.** The `cyrus` binary embeds chimera and
-lipsync as hidden subcommands (`cyrus chimera …`, `cyrus lipsync …`, the
-[busybox](https://en.wikipedia.org/wiki/BusyBox) pattern): `cyrus setup` spawns
-the two servers as `cyrus` subprocesses of itself, so the only file you need to
-ship or run is `cyrus`. The standalone `cyrus-chimera` / `cyrus-lipsync`
-binaries are also built, but only as a convenience for running a server
-directly during development — nothing in the product depends on them.
+lipsync as hidden subcommands (`cyrus chimera …`, `cyrus lipsync …`): `cyrus
+setup` spawns the two servers as `cyrus` subprocesses of itself, so the only
+file you need to ship or run is `cyrus`.
 
 ## Quick start
 
-Install (one self-contained binary — codex and cloudflared are embedded, nothing
-else to fetch):
+One command — install and run. codex and cloudflared are embedded, so there's
+nothing else to fetch:
 
 ```sh
-# with Node
-npx @mundy/cyrus setup
+# Node
+npm i -g @mundy/cyrus && cyrus
 ```
 ```sh
 # macOS / Linux — no Node required
@@ -82,15 +78,15 @@ curl -fsSL https://github.com/dannyisbad/cyrus/releases/latest/download/install.
 irm https://github.com/dannyisbad/cyrus/releases/latest/download/install.ps1 | iex
 ```
 
-Then connect your ChatGPT session once and go:
+The first run of `cyrus` opens Chrome and asks you to log in to ChatGPT once —
+the only manual step. After that, use `cyrus` anywhere you'd use `codex`:
 
 ```sh
-cyrus setup       # one-time: opens Chrome, you log in to ChatGPT
-cyrus             # codex on the plan you already pay for
+cyrus                          # codex, on the plan you already pay for
 cyrus exec "fix the failing test"
 ```
 
-You'll also need Google Chrome and a ChatGPT Plus/Pro account. Windows is the
+You'll need Google Chrome and a ChatGPT Plus/Pro account. Windows is the
 most-tested platform; macOS and Linux builds are published too.
 
 <details><summary>Build from source instead</summary>
@@ -187,17 +183,6 @@ personal account you can afford to lose.
 
 ```sh
 cargo test --workspace
-```
-
-Everything passes on a clean machine. The differential suite additionally
-byte-compares this Rust port against the private Node/Python originals it was
-ported from; without access to those originals the comparisons are reported as
-`SKIP` (not failures). If you do have them:
-
-```sh
-CYRUS_SHADOW_PY_ROOT=/path/to/dir-containing-idare-package \
-CYRUS_OAUTH_TS=/path/to/repo-agent-mcp/src/oauth.ts \
-cargo test -p cyrus-differential
 ```
 
 ## License

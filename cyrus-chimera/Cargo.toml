@@ -3,7 +3,7 @@ name = "cyrus-chimera"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Rust port of the chimera MCP + tool-relay + OAuth server (repo-agent-mcp)."
+description = "chimera: the MCP + tool-relay + OAuth server the ChatGPT connector talks to."
 
 [[bin]]
 name = "cyrus-chimera"
@@ -30,12 +30,10 @@ futures = { workspace = true }
 # Same version/features as cyrus-lipsync.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# OAuth/JWT: HS256 token signing + PKCE S256 verification. `ring` OR `hmac+sha2`
-# were both options in the brief; we take hmac+sha2+sha2 (pure-Rust, matches the
-# Node createHmac("sha256") exactly) plus jsonwebtoken for higher-level JWT work.
+# OAuth/JWT: HS256 token signing + PKCE S256 verification, hand-rolled on
+# pure-Rust hmac + sha2 (no JWT library needed).
 hmac = "0.12"
 sha2 = "0.10"
-jsonwebtoken = "9"
 
 # Streaming SSE bodies for /events tail (ReceiverStream wrapper).
 tokio-stream = { workspace = true }

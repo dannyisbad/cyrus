@@ -3,7 +3,7 @@ name = "cyrus-lipsync"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Rust port of the lipsync responses shim: impersonates OpenAI /v1/responses to codex, drives a chatgpt.com tab over CDP, and reconstructs answer tokens from the page websocket."
+description = "lipsync: impersonates OpenAI /v1/responses to codex, drives a chatgpt.com tab over CDP, and reconstructs answer tokens from the page websocket."
 
 [[bin]]
 name = "cyrus-lipsync"

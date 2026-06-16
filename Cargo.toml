@@ -4,11 +4,9 @@ members = [
     "cyrus-chimera",
     "cyrus-lipsync",
     "cyrus-setup",
-    "tests/differential",
 ]
 
-# Shared dependency versions for both crates. Pinning here keeps the two ports
-# on one lockfile and avoids drift as the skeleton fills in.
+# Shared dependency versions, pinned here so the crates stay on one lockfile.
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
