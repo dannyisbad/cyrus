@@ -1,8 +1,11 @@
 //! Headless `cyrus` CLI — same engine the codex TUI's option 4 runs, printing
 //! guided progress instead of rendering it.
 //!
-//!   cyrus setup [--repo <dir>] [--json]   converge the whole stack
+//!   cyrus setup [--repo <dir>] [--json] [--verbose]   converge the whole stack
 //!   cyrus check [--json]                   per-component diagnostics (exit 0 = healthy)
+//!
+//! `--verbose` (alias `--debug`) raises log levels: the chimera + lipsync children
+//! it spawns write debug-level logs, and the log file locations are printed.
 //!
 //! `--json` emits one JSON object per line on stdout — the machine contract the
 //! codex TUI parses (so it never has to scrape human labels):
@@ -25,6 +28,7 @@ use cyrus_engine::{
 struct Cli {
     opts: SetupOptions,
     json: bool,
+    verbose: bool,
 }
 
 fn step_key(step: Step) -> &'static str {
@@ -43,6 +47,7 @@ fn step_key(step: Step) -> &'static str {
 fn parse_args() -> Cli {
     let mut repo = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let mut json = false;
+    let mut verbose = false;
     let mut tunnel = TunnelChoice::Auto;
     let mut ngrok_domain: Option<String> = None;
     // skip argv0 and the subcommand token.
@@ -55,6 +60,7 @@ fn parse_args() -> Cli {
                 }
             }
             "--json" => json = true,
+            "--verbose" | "--debug" => verbose = true,
             // `--tunnel <auto|quick|ngrok|named>` — the lane the TUI picker chose.
             "--tunnel" => match args.next().as_deref() {
                 Some("auto") => tunnel = TunnelChoice::Auto,
@@ -80,7 +86,7 @@ fn parse_args() -> Cli {
     }
     let mut opts = SetupOptions::new(repo);
     opts.tunnel = tunnel;
-    Cli { opts, json }
+    Cli { opts, json, verbose }
 }
 
 fn emit_json(obj: serde_json::Value) {
@@ -221,7 +227,7 @@ async fn run_cyrus_command() -> ExitCode {
         // "setup" (the only remaining reserved command).
         _ => {
             let cli = parse_args();
-            run_setup(cli.opts, cli.json).await
+            run_setup(cli.opts, cli.json, cli.verbose).await
         }
     }
 }
@@ -541,7 +547,10 @@ async fn run_check(opts: &SetupOptions, json: bool) -> ExitCode {
 // setup — guided convergence
 // ---------------------------------------------------------------------------
 
-async fn run_setup(opts: SetupOptions, json: bool) -> ExitCode {
+async fn run_setup(opts: SetupOptions, json: bool, verbose: bool) -> ExitCode {
+    if verbose {
+        enable_verbose(&opts, json);
+    }
     if !json {
         print_intro(&opts);
     }
@@ -575,6 +584,27 @@ async fn run_setup(opts: SetupOptions, json: bool) -> ExitCode {
             render_failure(json, &opts, failed, &e);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `--verbose`/`--debug`: raise log levels so the chimera + lipsync children we
+/// spawn (they honor `RUST_LOG`) write debug logs, flip `CYRUS_DEBUG` for the
+/// codex-resolution trace, and point at the log files. Must run BEFORE the stack
+/// spawns so the children inherit the env.
+fn enable_verbose(opts: &SetupOptions, json: bool) {
+    if std::env::var_os("RUST_LOG").is_none() {
+        std::env::set_var("RUST_LOG", "debug,hyper=info,h2=info,rustls=info,reqwest=info");
+    }
+    std::env::set_var("CYRUS_DEBUG", "1");
+    if !json {
+        let logs = opts.cyrus_home().join("logs");
+        eprintln!(
+            "{}",
+            paint(
+                &format!("verbose · RUST_LOG=debug · server logs in {}", logs.display()),
+                DIM
+            )
+        );
     }
 }
 

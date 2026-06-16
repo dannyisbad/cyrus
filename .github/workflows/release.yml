@@ -70,20 +70,38 @@ jobs:
           cc --version
           xcodebuild -version
 
-      # Fast path: codex hasn't changed since a prior release, so reuse the
-      # already-built copy embedded in that release's cyrus binary instead of
-      # recompiling the (huge) codex workspace. Running the old binary once
-      # self-extracts its codex to CYRUS_HOME/bin via cyrus's own extractor
-      # (extract_once in embedded.rs) — that runs in codex_command() BEFORE codex
-      # launches, so even if the launched `codex --version` hangs on the
-      # onboarding gate, the binary is already on disk. We kill it after.
+      # Decide where codex comes from. An explicit dispatch input wins; otherwise,
+      # on a TAG build (a real release) reuse the previous release's embedded
+      # codex — codex.lock rarely moves and the reuse extracts the exact codex it
+      # shipped, so a v0.1.x release builds in minutes instead of recompiling the
+      # codex workspace. Set repo variable FORCE_CODEX_BUILD=1 before tagging a
+      # release that BUMPS codex.lock, or the stale codex would be embedded.
+      - name: Decide codex source
+        id: codexsrc
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          reuse="${{ inputs.reuse_codex_from }}"
+          if [ -z "$reuse" ] && [ "${{ github.ref_type }}" = "tag" ] && [ "${{ vars.FORCE_CODEX_BUILD }}" != "1" ]; then
+            reuse=$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null || true)
+          fi
+          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
+          echo "codex source: ${reuse:+reuse from $reuse}${reuse:-build from source}"
+
+      # Fast path: reuse the already-built codex embedded in a prior release's
+      # cyrus binary instead of recompiling the (huge) codex workspace. Running
+      # the old binary once self-extracts its codex to CYRUS_HOME/bin via cyrus's
+      # own extractor (extract_once in embedded.rs) — that runs in codex_command()
+      # BEFORE codex launches, so even if the launched `codex --version` hangs on
+      # the onboarding gate, the binary is already on disk. We kill it after.
       - name: Reuse codex from a prior release (fast path)
-        if: inputs.reuse_codex_from != ''
+        if: steps.codexsrc.outputs.reuse != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
-          tag="${{ inputs.reuse_codex_from }}"
+          tag="${{ steps.codexsrc.outputs.reuse }}"
           base="cyrus-${{ matrix.target }}"
           work="$RUNNER_TEMP/reuse"
           mkdir -p "$work" && cd "$work"
@@ -112,7 +130,7 @@ jobs:
 
       - name: Read pinned codex fork (scripts/codex.lock)
         id: codex
-        if: inputs.reuse_codex_from == ''
+        if: steps.codexsrc.outputs.reuse == ''
         run: |
           # POSIX [[:space:]], not \s: BSD sed on the macOS runners doesn't grok
           # \s, so it left a leading space in the value (url=" https://...") and
@@ -125,7 +143,7 @@ jobs:
           echo "codex fork: $url @ $sha"
 
       - name: Build pinned codex fork
-        if: inputs.reuse_codex_from == ''
+        if: steps.codexsrc.outputs.reuse == ''
         # The codex workspace is huge; its release profile (thin LTO +
         # line-tables debug, default parallelism) peaks past the runner's RAM
         # and the agent gets SIGKILLed (exit 143). Cap concurrency and strip the
