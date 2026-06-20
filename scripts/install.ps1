@@ -8,6 +8,7 @@
 #
 # Env knobs:  $env:CYRUS_INSTALL_DIR, $env:CYRUS_VERSION (e.g. v0.1.0), $env:CYRUS_REPO
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'  # IWR's progress bar throttles large downloads to a crawl on Windows PowerShell 5.1
 
 $repo    = if ($env:CYRUS_REPO) { $env:CYRUS_REPO } else { 'dannyisbad/cyrus' }
 $version = if ($env:CYRUS_VERSION) { $env:CYRUS_VERSION } else { 'latest' }
