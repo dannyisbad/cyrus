@@ -30,6 +30,9 @@ struct NamedTunnel {
     config_path: PathBuf,
     tunnel_id: String,
     hostname: String,
+    /// Raw service value of the chosen rule, e.g. `http://localhost:9999` —
+    /// kept verbatim so repoint can match the exact host the user wrote.
+    service: String,
     service_port: Option<u16>,
 }
 
@@ -92,35 +95,52 @@ fn find_cloudflared_exe() -> Option<PathBuf> {
     None
 }
 
-/// Light-touch parse of cloudflared's config.yml — only the three keys we
-/// need, no YAML dependency. (The file is machine-written and flat.)
-fn parse_named_tunnel() -> Option<NamedTunnel> {
+/// Light-touch parse of cloudflared's config.yml — no YAML dependency. (The
+/// file is machine-written and flat.) Selects the ingress rule cyrus should
+/// drive against `chimera_port` (see `select_ingress`).
+fn parse_named_tunnel(chimera_port: u16) -> Option<NamedTunnel> {
     let path = cloudflared_dir().join("config.yml");
     let text = std::fs::read_to_string(&path).ok()?;
+    let (tunnel_id, hostname, service, service_port) = select_ingress(&text, chimera_port)?;
+    Some(NamedTunnel {
+        config_path: path,
+        tunnel_id,
+        hostname,
+        service,
+        service_port,
+    })
+}
+
+/// Pick the ingress rule to drive: the one already pointing at `chimera_port`
+/// if any, else the first hostname rule. Returns (tunnel_id, hostname, raw
+/// service, port). Hostnames are paired with the service line that follows
+/// them, so a multi-ingress config doesn't get rule 0's hostname stapled to
+/// rule 1's service.
+fn select_ingress(text: &str, chimera_port: u16) -> Option<(String, String, String, Option<u16>)> {
     let mut tunnel_id = None;
-    let mut hostname = None;
-    let mut service_port = None;
+    let mut rules: Vec<(String, String, Option<u16>)> = Vec::new();
+    let mut pending_host: Option<String> = None;
     for line in text.lines() {
         let t = line.trim();
         if let Some(v) = t.strip_prefix("tunnel:") {
             tunnel_id = Some(v.trim().to_string());
         } else if let Some(v) = t.strip_prefix("- hostname:") {
-            if hostname.is_none() {
-                hostname = Some(v.trim().to_string());
-            }
+            pending_host = Some(v.trim().to_string());
         } else if let Some(v) = t.strip_prefix("service:") {
-            if service_port.is_none() {
-                // service: http://127.0.0.1:8787
-                service_port = v.trim().rsplit(':').next().and_then(|p| p.parse().ok());
+            // The catch-all `- service: http_status:404` keeps its `- ` prefix,
+            // so it never matches here and has no pending host anyway.
+            if let Some(host) = pending_host.take() {
+                let service = v.trim().to_string();
+                let port = service.rsplit(':').next().and_then(|p| p.parse().ok());
+                rules.push((host, service, port));
             }
         }
     }
-    Some(NamedTunnel {
-        config_path: path,
-        tunnel_id: tunnel_id?,
-        hostname: hostname?,
-        service_port,
-    })
+    let (hostname, service, port) = rules
+        .iter()
+        .find(|(_, _, p)| *p == Some(chimera_port))
+        .or_else(|| rules.first())?;
+    Some((tunnel_id?, hostname.clone(), service.clone(), *port))
 }
 
 /// Repoint the named tunnel's local service at our chimera port (backup first).
@@ -128,7 +148,7 @@ fn repoint_service(nt: &NamedTunnel, port: u16) -> anyhow::Result<()> {
     let text = std::fs::read_to_string(&nt.config_path)?;
     let backup = nt.config_path.with_extension("yml.bak-cyrus");
     std::fs::write(&backup, &text)?;
-    let from = format!("service: http://127.0.0.1:{}", nt.service_port.unwrap_or(0));
+    let from = format!("service: {}", nt.service);
     let to = format!("service: http://127.0.0.1:{port}");
     let updated = text.replace(&from, &to);
     anyhow::ensure!(
@@ -197,7 +217,7 @@ pub async fn ensure_tunnel(opts: &SetupOptions) -> anyhow::Result<TunnelOutcome>
         }
         TunnelChoice::Named => {
             anyhow::ensure!(
-                parse_named_tunnel().is_some(),
+                parse_named_tunnel(opts.chimera_port).is_some(),
                 "no named cloudflared tunnel found at ~/.cloudflared/config.yml — set one up \
                  (you need your own domain), or pick the quick or ngrok tunnel"
             );
@@ -232,7 +252,7 @@ pub async fn ensure_tunnel(opts: &SetupOptions) -> anyhow::Result<TunnelOutcome>
     }
 
     // 2. cloudflared named.
-    if parse_named_tunnel().is_some() {
+    if parse_named_tunnel(opts.chimera_port).is_some() {
         return cloudflared_named(opts).await;
     }
 
@@ -254,7 +274,7 @@ pub async fn ensure_tunnel(opts: &SetupOptions) -> anyhow::Result<TunnelOutcome>
 }
 
 async fn cloudflared_named(opts: &SetupOptions) -> anyhow::Result<TunnelOutcome> {
-    if let Some(nt) = parse_named_tunnel() {
+    if let Some(nt) = parse_named_tunnel(opts.chimera_port) {
         let public_url = format!("https://{}", nt.hostname);
 
         if nt.service_port != Some(opts.chimera_port) {
@@ -564,6 +584,39 @@ mod tests {
             Some("https://random-words-here.trycloudflare.com")
         );
         assert_eq!(extract_trycloudflare_url("no url here"), None);
+    }
+
+    #[test]
+    fn select_ingress_prefers_rule_already_on_chimera_port() {
+        // Two hostname rules; the chimera-port one is second, and the first uses
+        // `localhost` (not 127.0.0.1). cyrus must pick the matching rule, not #0.
+        let cfg = "tunnel: abc-123\n\
+                   ingress:\n\
+                   \x20 - hostname: sb.solvero.app\n\
+                   \x20   service: http://localhost:9999\n\
+                   \x20 - hostname: chimera.solvero.app\n\
+                   \x20   service: http://127.0.0.1:8787\n\
+                   \x20 - service: http_status:404\n";
+        let (id, host, service, port) = select_ingress(cfg, 8787).expect("a rule");
+        assert_eq!(id, "abc-123");
+        assert_eq!(host, "chimera.solvero.app");
+        assert_eq!(service, "http://127.0.0.1:8787");
+        assert_eq!(port, Some(8787));
+    }
+
+    #[test]
+    fn select_ingress_falls_back_to_first_rule_and_keeps_host_literal() {
+        // No rule on the chimera port → fall back to the first hostname rule,
+        // preserving its `localhost` literal so repoint can match it.
+        let cfg = "tunnel: abc-123\n\
+                   ingress:\n\
+                   \x20 - hostname: sb.solvero.app\n\
+                   \x20   service: http://localhost:9999\n\
+                   \x20 - service: http_status:404\n";
+        let (_, host, service, port) = select_ingress(cfg, 8787).expect("a rule");
+        assert_eq!(host, "sb.solvero.app");
+        assert_eq!(service, "http://localhost:9999");
+        assert_eq!(port, Some(9999));
     }
 
     #[test]
